@@ -18,7 +18,7 @@ import matplotlib
 # import glob
 import shutil
 
-from core.evaluation.metrics import CondMolGenMetric
+# from core.evaluation.metrics import CondMolGenMetric
 # from core.evaluation.utils import convert_atomcloud_to_mol_smiles, save_mol_list
 # from core.evaluation.visualization import visualize, visualize_chain
 # from core.utils import transforms as trans
@@ -63,13 +63,13 @@ class DockingTestCallback(Callback):
     
     def setup(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:
         super().setup(trainer, pl_module, stage)
-        self.metric = CondMolGenMetric(
-            atom_decoder=self.atom_decoder,
-            atom_enc_mode=self.atom_enc_mode,
-            type_one_hot=self.type_one_hot,
-            single_bond=self.single_bond,
-            docking_config=self.docking_config,
-        )
+        # self.metric = CondMolGenMetric(
+        #     atom_decoder=self.atom_decoder,
+        #     atom_enc_mode=self.atom_enc_mode,
+        #     type_one_hot=self.type_one_hot,
+        #     single_bond=self.single_bond,
+        #     docking_config=self.docking_config,
+        # )
     
     def on_test_batch_end(
         self,

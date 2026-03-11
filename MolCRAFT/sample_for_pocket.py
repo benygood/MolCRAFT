@@ -33,8 +33,8 @@ from pytorch_lightning import seed_everything
 # import glob
 
 from core.evaluation.utils import scoring_func
-from core.evaluation.docking_vina import VinaDockingTask
-from posecheck import PoseCheck
+# from core.evaluation.docking_vina import VinaDockingTask
+# from posecheck import PoseCheck
 import numpy as np
 from rdkit import Chem
 
@@ -99,7 +99,7 @@ def call(protein_fn, ligand_fn, ckpt_path='./checkpoints/last.ckpt',
          num_samples=10, sample_steps=100, sample_num_atoms='prior', 
          beta1=1.5, sigma1_coord=0.03, sampling_strategy='end_back', seed=1234):
     
-    cfg = Config('./checkpoints/config.yaml')
+    cfg = Config('./configs/config.yaml')
     seed_everything(cfg.seed)
     
     cfg.evaluation.protein_path = protein_fn
@@ -266,7 +266,7 @@ if __name__ == '__main__':
     protein_path = sys.argv[1]
     ligand_path = sys.argv[2]
 
-    call(protein_path, ligand_path)
-    out_fn = 'output/0.sdf'
-    metrics = Metrics(protein_path, ligand_path, out_fn).evaluate()
-    print(json.dumps(metrics, indent=4, cls=NpEncoder))
+    call(protein_path, ligand_path, num_samples=10)
+    # out_fn = 'output/0.sdf'
+    # metrics = Metrics(protein_path, ligand_path, out_fn).evaluate()
+    # print(json.dumps(metrics, indent=4, cls=NpEncoder))

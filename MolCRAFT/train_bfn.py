@@ -13,11 +13,11 @@ import datetime, pytz
 from core.config.config import Config, parse_config
 from core.models.sbdd_train_loop import SBDDTrainLoop
 from core.callbacks.basic import RecoverCallback, GradientClip, NormalizerCallback, EMACallback
-from core.callbacks.validation_callback import (
-    ValidationCallback,
-    VisualizeMolAndTrajCallback,
-    DockingTestCallback,
-)
+# from core.callbacks.validation_callback import (
+#     ValidationCallback,
+#     VisualizeMolAndTrajCallback,
+#     DockingTestCallback,
+# )
 
 import core.utils.transforms as trans
 from core.datasets import get_dataset
@@ -293,29 +293,29 @@ if __name__ == "__main__":
             ),
             GradientClip(max_grad_norm=cfg.train.max_grad_norm),  # time consuming
             NormalizerCallback(normalizer_dict=cfg.data.normalizer_dict),
-            ValidationCallback(
-                dataset=None,  # TODO: implement CrossDockGen & NewBenchmark
-                atom_decoder=cfg.data.atom_decoder,
-                atom_enc_mode=cfg.data.transform.ligand_atom_mode,
-                atom_type_one_hot=False,
-                single_bond=True,
-                docking_config=cfg.evaluation.docking_config,
-                val_freq=cfg.train.val_freq,
-                # single_bond=cfg.evaluation.single_bond,  # TODO: check compatibility
-            ),
+            # ValidationCallback(
+            #     dataset=None,  # TODO: implement CrossDockGen & NewBenchmark
+            #     atom_decoder=cfg.data.atom_decoder,
+            #     atom_enc_mode=cfg.data.transform.ligand_atom_mode,
+            #     atom_type_one_hot=False,
+            #     single_bond=True,
+            #     docking_config=cfg.evaluation.docking_config,
+            #     val_freq=cfg.train.val_freq,
+            #     # single_bond=cfg.evaluation.single_bond,  # TODO: check compatibility
+            # ),
             # VisualizeMolAndTrajCallback(
             #     atom_decoder=cfg.data.atom_decoder,
             #     colors_dic=cfg.data.colors_dic,
             #     radius_dic=cfg.data.radius_dic,
             # ),
-            DockingTestCallback(
-                dataset=None,  # TODO: implement CrossDockGen & NewBenchmark
-                atom_decoder=cfg.data.atom_decoder,
-                atom_enc_mode=cfg.data.transform.ligand_atom_mode,
-                atom_type_one_hot=False,
-                single_bond=True,
-                docking_config=cfg.evaluation.docking_config,
-            ),
+            # DockingTestCallback(
+            #     dataset=None,  # TODO: implement CrossDockGen & NewBenchmark
+            #     atom_decoder=cfg.data.atom_decoder,
+            #     atom_enc_mode=cfg.data.transform.ligand_atom_mode,
+            #     atom_type_one_hot=False,
+            #     single_bond=True,
+            #     docking_config=cfg.evaluation.docking_config,
+            # ),
             ModelCheckpoint(
                 monitor="val/recon_loss",
                 every_n_epochs=cfg.train.ckpt_freq,

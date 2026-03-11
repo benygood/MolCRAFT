@@ -19,7 +19,7 @@ import glob
 import shutil
 import time
 
-from core.evaluation.metrics import CondMolGenMetric
+# from core.evaluation.metrics import CondMolGenMetric
 from core.evaluation.utils import convert_atomcloud_to_mol_smiles, save_mol_list
 from core.evaluation.visualization import visualize, visualize_chain
 from core.utils import transforms as trans
@@ -490,13 +490,13 @@ class DockingTestCallback(Callback):
     
     def setup(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:
         super().setup(trainer, pl_module, stage)
-        self.metric = CondMolGenMetric(
-            atom_decoder=self.atom_decoder,
-            atom_enc_mode=self.atom_enc_mode,
-            type_one_hot=self.type_one_hot,
-            single_bond=self.single_bond,
-            docking_config=self.docking_config,
-        )
+        # self.metric = CondMolGenMetric(
+        #     atom_decoder=self.atom_decoder,
+        #     atom_enc_mode=self.atom_enc_mode,
+        #     type_one_hot=self.type_one_hot,
+        #     single_bond=self.single_bond,
+        #     docking_config=self.docking_config,
+        # )
     
     def on_test_batch_end(
         self,
@@ -537,19 +537,19 @@ class DockingTestCallback(Callback):
         pl_module.cfg.save2yaml(os.path.join(path, 'config.yaml'))
         torch.save(results, os.path.join(path, f'generated.pt'))
 
-        bad_case_dir = os.path.join(path, 'bad_cases')
-        os.makedirs(bad_case_dir, exist_ok=True)
-        print(f'bad cases dumped to {bad_case_dir}')
+        # bad_case_dir = os.path.join(path, 'bad_cases')
+        # os.makedirs(bad_case_dir, exist_ok=True)
+        # print(f'bad cases dumped to {bad_case_dir}')
 
-        out_metrics = self.metric.evaluate(results, bad_case_dir)
-        torch.save(results, os.path.join(path, f'vina_docked.pt'))
-        out_metrics.update(recon_dict)
-        out_metrics = {f'test/{k}': v for k, v in out_metrics.items()}
-        pl_module.log_dict(out_metrics)
+        # out_metrics = self.metric.evaluate(results, bad_case_dir)
+        # torch.save(results, os.path.join(path, f'vina_docked.pt'))
+        # out_metrics.update(recon_dict)
+        # out_metrics = {f'test/{k}': v for k, v in out_metrics.items()}
+        # pl_module.log_dict(out_metrics)
 
-        out_metrics['ckpt_path'] = pl_module.cfg.evaluation.ckpt_path
-        out_metrics['test_outputs_dir'] = path
-        out_metrics['sample_num_atoms'] = pl_module.cfg.evaluation.sample_num_atoms
-        print(json.dumps(out_metrics, indent=4))
-        json.dump(out_metrics, open(os.path.join(path, 'metrics.json'), 'w'), indent=4)
+        # out_metrics['ckpt_path'] = pl_module.cfg.evaluation.ckpt_path
+        # out_metrics['test_outputs_dir'] = path
+        # out_metrics['sample_num_atoms'] = pl_module.cfg.evaluation.sample_num_atoms
+        # print(json.dumps(out_metrics, indent=4))
+        # json.dump(out_metrics, open(os.path.join(path, 'metrics.json'), 'w'), indent=4)
 
