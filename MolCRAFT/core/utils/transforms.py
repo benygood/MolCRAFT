@@ -58,7 +58,7 @@ MAP_ATOM_TYPE_AROMATIC_TO_INDEX = {
     (15, True): 9,
     (16, False): 10,
     (16, True): 11,
-    (17, False): 12
+    (17, False): 12,
 }
 
 # pdb   aromatic_counter {(6, False): 803564, (8, False): 264143, (7, False): 198073, (6, True): 1371671, (7, True): 209316, (8, True): 8567, (9, False): 72259, (16, False): 21263, (17, False): 26781, (16, True): 11529, (35, False): 3359, (15, False): 2051, (1, False): 998, (53, False): 852, (14, False): 92, (5, False): 57} 
@@ -188,7 +188,7 @@ def get_index(atom_num, hybridization, is_aromatic, mode):
         if (int(atom_num), bool(is_aromatic)) in MAP_ATOM_TYPE_AROMATIC_TO_INDEX:
             return MAP_ATOM_TYPE_AROMATIC_TO_INDEX[int(atom_num), bool(is_aromatic)]
         else:
-            print(int(atom_num), bool(is_aromatic))
+            # print(int(atom_num), bool(is_aromatic))
             return MAP_ATOM_TYPE_AROMATIC_TO_INDEX[(1, False)]
     elif mode == 'add_aromatic_PDB':
         # self.atomic_numbers = torch.LongTensor([1, 6, 7, 8, 9, 15, 16, 17, 35])  # H, C, N, O, F, P, S, Cl, Br
@@ -210,7 +210,7 @@ class FeaturizeProteinAtom(object):
     def __init__(self):
         super().__init__()
         self.atomic_numbers = torch.LongTensor([1, 6, 7, 8, 16, 34])  # H, C, N, O, S, Se
-        self.max_num_aa = 20
+        self.max_num_aa = 21
 
     @property
     def feature_dim(self):

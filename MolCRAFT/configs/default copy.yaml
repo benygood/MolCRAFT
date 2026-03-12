@@ -15,7 +15,7 @@ dynamics:
   t_min: !SUB ${t_min}
   sigma1_coord: !SUB ${sigma1_coord}
   beta1: !SUB ${beta1}
-  protein_atom_feature_dim: 28 #TODO
+  protein_atom_feature_dim: 27 #TODO
   ligand_atom_feature_dim: 13
   use_discrete_t: !SUB ${use_discrete_t}
   discrete_steps: !SUB ${discrete_steps}
@@ -61,12 +61,12 @@ accounting:
 
 
 data:
-  name: pl_ext # pl, pl_tr
-  path: ./data/complex_ext_v2.csv
+  name: pl # pl, pl_tr
+  path: ./data/crossdocked_v1.1_rmsd1.0_pocket10
+  split:  ./data/crossdocked_pocket10_pose_split.pt
   transform:
     ligand_atom_mode: add_aromatic
   with_split: True
-  split_ratio: 1000
   atom_decoder: ['H', 'C', 'N', 'O', 'F', 'P', 'S', 'Cl']
   colors_dic: ['#FFFFFF99', 'C7', 'C0', 'C3', 'C1', 'C4', 'C8', 'C9', ]
   radius_dic: [0.3, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6]
@@ -82,7 +82,7 @@ visual:
 
 train:
   batch_size: !SUB ${batch_size}
-  num_workers: 0
+  num_workers: 8
   pos_noise_std: !SUB ${pos_noise_std}
   random_rot: !SUB ${random_rot}
   val_freq: 1000

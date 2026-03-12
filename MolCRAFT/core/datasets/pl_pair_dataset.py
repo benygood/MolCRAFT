@@ -1,10 +1,25 @@
-import os
+import glob
+import os,io
 import pickle
+import random
 import lmdb
+import torch
 from torch.utils.data import Dataset
 from tqdm.auto import tqdm
 import sys
 from time import time
+import pandas as pd
+import multiprocessing as mp
+from multiprocessing import Pool
+import traceback
+from rdkit import Chem
+from torch.utils.data import Subset
+import numpy as np
+import csv
+from typing import Callable, Optional, List, Any
+
+
+
 
 import torch
 from torch_geometric.transforms import Compose
@@ -13,7 +28,10 @@ from core.datasets.utils import PDBProtein, parse_sdf_file, ATOM_FAMILIES_ID
 from core.datasets.pl_data import ProteinLigandData, torchify_dict
 
 import core.utils.transforms as trans
+from torch_geometric.data import Batch
 
+class SkipSampleException(Exception):
+    pass
 
 class DBReader:
     def __init__(self, path) -> None:
@@ -28,7 +46,7 @@ class DBReader:
         assert self.db is None, 'A connection has already been opened.'
         self.db = lmdb.open(
             self.path,
-            map_size=10*(1024*1024*1024),   # 10GB
+            map_size=30*(1024*1024*1024),   # 100GB
             create=False,
             subdir=False,
             readonly=True,
@@ -56,13 +74,15 @@ class DBReader:
     def __getitem__(self, idx):
         if self.db is None:
             self._connect_db()
+        
         key = self.keys[idx]
         data = pickle.loads(self.db.begin().get(key))
         data = ProteinLigandData(**data)
         data.id = idx
-        assert data.protein_pos.size(0) > 0
+        # assert data.protein_pos.size(0) > 0
         return data
-    
+
+        
 
 class PocketLigandPairDataset(Dataset):
 
@@ -125,6 +145,142 @@ class PocketLigandPairDataset(Dataset):
             data = self.transform(data)
         return data
 
+def write_xyz(filename, coords, elements):
+    pass
+def process_func(args):
+    chunk_id, df_chunk = args
+    device_id = chunk_id % 6 + 2 # 假设有6个GPU，循环使用它们,从2号卡开始
+    print(f'process_func called: {chunk_id}，{device_id}')
+    torch.cuda.set_device(device_id)
+    device = torch.device(f'cuda:{device_id}') 
+
+    row_list = []
+    acc_num = 0
+    error_num = 0
+    for i, row in df_chunk.iterrows():
+        pocket_block = row['cut_protein_pdb']
+        ligand_block = row['cut_ligand_sdf']
+        #debug NCI info        
+        # nci_data = row['nci_info']                                         
+        # if isinstance(nci_data, str):
+        #     binary_data = bytes.fromhex(nci_data)
+        #     nci_data_io = io.BytesIO(binary_data)
+        #     pdb_oddt_npy = np.load(nci_data_io, allow_pickle=True)
+        # else:
+        #     pdb_oddt_npy = pickle.loads(nci_data)
+
+        # pocket_contact_coords = pdb_oddt_npy[0]
+        # ligand_contact_coords = pdb_oddt_npy[1]
+            
+
+        try:
+            pocket_dict = PDBProtein(pocket_block, device=device).to_dict_atom()
+            ligand_dict = parse_sdf_file(Chem.MolFromMolBlock(ligand_block, removeHs=False))
+            data = ProteinLigandData.from_protein_ligand_dicts(
+                protein_dict=torchify_dict(pocket_dict),
+                ligand_dict=torchify_dict(ligand_dict),
+                device=device
+            )
+            data.pdb_id = row['pdb_id']
+            data.ligand_smiles = row['canonical_smiles']
+            data = data.to_dict()  # avoid torch_geometric version issue
+            row_list.append(data)
+            acc_num += 1
+        except Exception as e:
+            error_num += 1
+            print(f'Skipping ({chunk_id}:{i}) EORROR: {e}')
+            print(traceback.format_exc())
+            continue
+    return chunk_id, row_list, acc_num, error_num
+
+class PocketLigandPairDatasetV2(Dataset):
+
+    def __init__(self, csv_path, transform=None, version='final'):
+        super().__init__()
+        self.csv_path = csv_path
+        self.processed_path = os.path.join(os.path.dirname(self.csv_path),
+                                           os.path.basename(self.csv_path) + f'_processed_{version}.lmdb')
+        self.transform = transform
+        self.reader = DBReader(self.processed_path)
+
+        if not os.path.exists(self.processed_path):
+            print(f'{self.processed_path} does not exist, begin processing data')
+            self._process()
+        
+    def _process(self):
+        db = lmdb.open(
+            self.processed_path,
+            map_size=100*(1024*1024*1024),   # 100GB
+            create=True,
+            subdir=False,
+           
+            readonly=False,  # Writable
+        )
+        csv_chunk_reader = pd.read_csv(self.csv_path,chunksize=1000)
+        
+        # # For debug:
+        # for args in enumerate(csv_chunk_reader):
+        #     result = process_func(args)  # warm u
+        #     chunk_id, row_list, acc_num, error_num = result
+        #     with db.begin(write=True, buffers=True) as txn:
+        #         for i, data in enumerate(row_list):
+        #             idx = chunk_id * 2000 + i
+        #             txn.put(
+        #                 key=str(idx).encode(),
+        #                 value=pickle.dumps(data)
+        #                 )
+                        
+        #         print(f"Chunk {chunk_id} Done! row num:{acc_num}, error num: {error_num}")
+    
+        with Pool(processes=6) as pool:
+            results = pool.imap(process_func, enumerate(csv_chunk_reader))
+            for result in results:
+                chunk_id, row_list, acc_num, error_num = result
+                print(f'Got result from process_func: {chunk_id}, {acc_num}, {error_num}')
+
+                with db.begin(write=True) as txn:
+                    for i, data in enumerate(row_list):
+                        idx = chunk_id * 1000 + i
+                        txn.put(
+                            key=str(idx).encode(),
+                            value=pickle.dumps(data)
+                            )     
+                print(f"Chunk {chunk_id} Done! row num:{acc_num}, error num: {error_num}")   
+            
+        db.close()
+    
+    def __len__(self):
+        return len(self.reader)
+
+    def __getitem__(self, idx):
+        data = self.reader[idx]
+        if self.transform is not None:
+            data = self.transform(data)
+        return data
+    
+    def make_test_split(self, split_ratio=0.9):
+        """
+        Create a train/test split of the dataset.
+        when split_ratio is greater than 1, it is treated as the absolute number of testing samples.
+        """
+        total_size = len(self)
+        indices = list(range(total_size))
+        #log the time cost:
+        print("make_test_split init random indices...")
+        indices = random.sample(indices, total_size)  # shuffle indices
+        assert split_ratio >= 0.0, "split_ratio must >= 0"
+        if split_ratio <= 1.0:
+            split = int(total_size * split_ratio)
+        else:
+            split = total_size - int(split_ratio)
+        print("make_test_split init random indices done!")
+        train_indices = indices[:split]
+        test_indices = indices[split:]
+
+        return {
+            'train': Subset(self, train_indices),
+            'test': Subset(self, test_indices)
+        }
 
 class PocketLigandGeneratedPairDataset(Dataset):
 
@@ -362,11 +518,293 @@ class PocketLigandPairDatasetFeaturized(Dataset):
             'ligand_atom_feature_dim': self.ligand_atom_feature_dim,
         }, self.transformed_path)
 
+class ChunkedCSVDataset(Dataset):
+    def __init__(self, 
+                 file_path: str, 
+                 chunk_size: int = 10000,
+                 max_lines: Optional[int] = None,   
+                 transform: Optional[Callable] = None,
+                 target_transform: Optional[Callable] = None,
+                 usecols: Optional[List] = None,
+                 dtype: Optional[dict] = None):
+        """
+        基于Pandas分块读取的大型CSV数据集
+        
+        参数:
+            file_path: CSV文件路径
+            chunk_size: 每个分块的行数
+            transform: 特征转换函数
+            target_transform: 标签转换函数
+            usecols: 指定要读取的列[3](@ref)
+            dtype: 列数据类型优化[3](@ref)
+        """
+        self.file_path = file_path
+        self.chunk_size = chunk_size
+        self.transform = transform
+        self.target_transform = target_transform
+        self.usecols = usecols
+        self.dtype = dtype
+        self.max_lines = max_lines
+        
+        # 获取总行数(排除标题行)
+        if self.max_lines is not None and self.max_lines > 0:
+            self.total_rows = self.max_lines
+        else:
+            self.total_rows = self._count_lines()
+        
+        # 预计算每个分块的起始索引
+        self.chunk_ranges = []
+        for i in range(0, self.total_rows, chunk_size):
+            end = min(i + chunk_size, self.total_rows)
+            self.chunk_ranges.append((i, end))
+        
+        # 当前加载的分块
+        self.current_chunk = None
+        self.current_chunk_idx = -1
+        self.current_chunk_start_idx = 0
+        
+        # 获取列名
+        self.column_names = self._get_column_names()
+        
+    def _count_lines(self) -> int:
+        """计算CSV文件行数(排除标题行)"""
+        with open(self.file_path, 'r', encoding='utf-8') as f:
+            # 跳过标题行
+            f.readline()
+            return sum(1 for _ in f)
+    
+    def _get_column_names(self) -> List[str]:
+        """获取CSV文件的列名"""
+        # 读取第一行获取列名
+        sample_df = pd.read_csv(self.file_path, nrows=1)
+        return list(sample_df.columns)
+    
+    def _load_chunk(self, chunk_idx: int) -> pd.DataFrame:
+        """加载指定分块的数据"""
+        if chunk_idx < 0 or chunk_idx >= len(self.chunk_ranges):
+            raise IndexError(f"Chunk index {chunk_idx} out of range")
+        
+        start_idx, end_idx = self.chunk_ranges[chunk_idx]
+        
+        # 计算需要跳过的行数(包括标题行)
+        skiprows = start_idx + 1
+        
+        # 计算需要读取的行数
+        nrows = end_idx - start_idx
+        
+        # 使用pandas分块读取特定范围的数据[1,7](@ref)
+        chunk = pd.read_csv(
+            self.file_path,
+            skiprows=skiprows,
+            nrows=nrows,
+            header=None,  # 因为我们已经跳过了标题行
+            names=self.column_names,
+            usecols=self.usecols,
+            dtype=self.dtype
+        )
+        
+        return chunk
+    
+    def __len__(self) -> int:
+        return self.total_rows
+    
+    def __getitem__(self, idx: int) -> Any:
+        """获取单个样本"""
+        if idx < 0 or idx >= self.total_rows:
+            raise IndexError(f"Index {idx} out of range [0, {self.total_rows-1}]")
+        
+        # 计算当前样本所在的分块
+        chunk_idx = idx // self.chunk_size
+        
+        # 如果分块未加载，加载对应分块
+        if chunk_idx != self.current_chunk_idx:
+            self.current_chunk = self._load_chunk(chunk_idx)
+            self.current_chunk_idx = chunk_idx
+            self.current_chunk_start_idx = chunk_idx * self.chunk_size
+        
+        # 获取分块内的相对索引
+        local_idx = idx - self.current_chunk_start_idx
+        
+        # 获取行数据
+        row = self.current_chunk.iloc[local_idx]
+        
+        # 假设最后一列是标签，其余是特征
+        sdf_str = row['conf']
+        try:
+            mol = Chem.MolFromMolBlock(sdf_str, removeHs=False)
+            ligand_dict = parse_sdf_file(mol)
+            data = ProteinLigandData.from_protein_ligand_dicts(
+                        ligand_dict=torchify_dict(ligand_dict)
+                    )
+            data.ligand_filename = row['uni_id']
 
+            if self.transform:
+                data = self.transform(data)
+            return data
+        except Exception as e:
+            print(f"Error processing SDF for index {idx}: {e}\n{row}\n")
+            return self.__getitem__(random.randint(0, idx-1))
+            # raise SkipSampleException(f"Error loading data at index {idx}")
+ 
+ 
+def ligand_process_func(args):
+    chunk_id, df_chunk = args
+    print(f'process_func called: {chunk_id}')
+
+    row_list = []
+    acc_num = 0
+    error_num = 0
+    for i, row in df_chunk.iterrows():
+        ligand_block = row['conf']
+        #debug NCI info        
+        # nci_data = row['nci_info']                                         
+        # if isinstance(nci_data, str):
+        #     binary_data = bytes.fromhex(nci_data)
+        #     nci_data_io = io.BytesIO(binary_data)
+        #     pdb_oddt_npy = np.load(nci_data_io, allow_pickle=True)
+        # else:
+        #     pdb_oddt_npy = pickle.loads(nci_data)
+
+        # pocket_contact_coords = pdb_oddt_npy[0]
+        # ligand_contact_coords = pdb_oddt_npy[1]
+            
+
+        try:
+            ligand_dict = parse_sdf_file(Chem.MolFromMolBlock(ligand_block, removeHs=False),add_h=False)
+            data = ProteinLigandData.from_protein_ligand_dicts(
+                ligand_dict=torchify_dict(ligand_dict)
+            )
+            data.ligand_filename = row['uni_id']
+            data.ligand_smiles = row['smi']
+            data.ligand_sdf_block = ligand_block
+            data = data.to_dict()  # avoid torch_geometric version issue
+            row_list.append(data)
+            acc_num += 1
+        except Exception as e:
+            error_num += 1
+            print(f'Skipping ({chunk_id}:{i}) EORROR: {e}')
+            print(traceback.format_exc())
+            continue
+    return chunk_id, row_list, acc_num, error_num
+
+class LigandDataset(Dataset):
+
+    def __init__(self, csv_path, transform=None, version='final'):
+        super().__init__()
+        self.csv_path = csv_path
+        self.transform = transform
+        self.processed_path = os.path.join(os.path.dirname(self.csv_path),
+                                           os.path.basename(self.csv_path) + f'_processed_{version}.lmdb')
+        self.reader = DBReader(self.processed_path)
+
+        if not os.path.exists(self.processed_path):
+            print(f'{self.processed_path} does not exist, begin processing data')
+            self._process()
+        
+    def _process(self):
+        db = lmdb.open(
+            self.processed_path,
+            map_size=100*(1024*1024*1024),   # 100GB
+            create=True,
+            subdir=False,
+           
+            readonly=False,  # Writable
+        )
+        csv_chunk_reader = pd.read_csv(self.csv_path,chunksize=1000)
+        
+        # # For debug:
+        # for args in enumerate(csv_chunk_reader):
+        #     result = process_func(args)  # warm u
+        #     chunk_id, row_list, acc_num, error_num = result
+        #     with db.begin(write=True, buffers=True) as txn:
+        #         for i, data in enumerate(row_list):
+        #             idx = chunk_id * 2000 + i
+        #             txn.put(
+        #                 key=str(idx).encode(),
+        #                 value=pickle.dumps(data)
+        #                 )
+                        
+        #         print(f"Chunk {chunk_id} Done! row num:{acc_num}, error num: {error_num}")
+    
+        with Pool(processes=10) as pool:
+            results = pool.imap(ligand_process_func, enumerate(csv_chunk_reader))
+            for result in results:
+                chunk_id, row_list, acc_num, error_num = result
+
+                with db.begin(write=True) as txn:
+                    for i, data in enumerate(row_list):
+                        idx = chunk_id * 1000 + i
+                        txn.put(
+                            key=str(idx).encode(),
+                            value=pickle.dumps(data)
+                            )     
+                print(f"Chunk {chunk_id} Done! row num:{acc_num}, error num: {error_num}")   
+            
+        db.close()
+    
+    def __len__(self):
+        return len(self.reader)
+
+    def __getitem__(self, idx):
+        data = self.reader[idx]
+        if self.transform is not None:
+            data = self.transform(data)
+        return data
+    
+    def get_range(self, start_idx=0, size=None):
+        total_size = len(self)
+        assert start_idx < total_size, "start index can not greater than total size!!"
+        if size is None or size < 1:
+            size = total_size
+        end_idx = start_idx + size - 1
+        if end_idx >= total_size:
+            end_idx = total_size - 1
+        indices = list(range(start_idx, end_idx+1))
+        return Subset(self, indices)
+
+def load_pocket_size_dict(dirpath, pattern=""):
+    pocket_size_dict = {}
+    pocket_size_files = glob.glob(f"{dirpath}/**/{pattern}", recursive=True)
+
+    # for path in os.listdir(dirpath):
+    for path in pocket_size_files:
+        # path = os.path.join(dirpath, path)
+        print(f'Loading pocket size from {path}...')
+        with open(path, 'r') as f:
+            total_lines = sum(1 for line in f) # 或者使用 len(f.readlines())，但会多读一次文件
+            f.seek(0)  # 将文件指针重置回开头
+            # 使用 tqdm 包装文件读取过程
+            for row in tqdm(f.readlines(), total=total_lines, desc="Load pocket size dict", unit="line"):
+                id, smi, size = row.strip().split('\t')
+                pocket_size_dict[id] = int(float(size))
+    return pocket_size_dict
+    
+def sample_pocket_nums(pocket_num, sample_ratios=[-1,0,1,2]):
+    pocket_num_min = 200
+    pocket_num_max = 800
+    pocket_nums = []  # Sample several numbers around pocket_num, interval is 30
+    for i in sample_ratios:
+        v = pocket_num + i * 30
+        if v < pocket_num_min:
+            v = 200
+        if v > pocket_num_max:
+            v = 800
+        pocket_nums.append(v)
+    return pocket_nums
+        
 if __name__ == '__main__':
     # original dataset
-    dataset = PocketLigandPairDataset('./data/crossdocked_v1.1_rmsd1.0_pocket10')
+    # dataset = PocketLigandPairDataset('./data/crossdocked_v1.1_rmsd1.0_pocket10')
+    # print(len(dataset), dataset[0])
+
+    # dataset = PocketLigandPairDatasetV2('/home/jovyan/data/EDMol/complex_ext_v2.csv')
+    # mp.set_start_method('spawn')
+    # dataset = PocketLigandPairDatasetV2('/home/jovyan/data/EDMol/complex_rcomplexdb_273w/complex_ext_v2.csv')
+    # dataset = LigandDataset('/home/jovyan/data/EDMol/pretrain_592.csv')
+    dataset = LigandDataset('/home/jovyan/data/EDMol/pretrain_108w.csv')
     print(len(dataset), dataset[0])
+    print(dataset[0].ligand_element)
+    print(dataset[0].ligand_pos)
 
     ############################################################
 
@@ -449,4 +887,6 @@ if __name__ == '__main__':
     # print('type_counter', type_counter)
     # print('aromatic_counter', aromatic_counter)
     # print('full_counter', full_counter)
+
+
 

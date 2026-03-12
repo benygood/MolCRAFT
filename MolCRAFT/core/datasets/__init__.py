@@ -1,7 +1,8 @@
 import torch
 from torch.utils.data import Subset
-from core.datasets.pl_pair_dataset import PocketLigandPairDataset, PocketLigandPairDatasetFeaturized, PocketLigandGeneratedPairDataset
+from core.datasets.pl_pair_dataset import PocketLigandPairDataset,PocketLigandPairDatasetV2, PocketLigandPairDatasetFeaturized, PocketLigandGeneratedPairDataset
 from core.datasets.pdbbind import PDBBindDataset
+import os
 
 
 def get_dataset(config, *args, **kwargs):
@@ -19,14 +20,25 @@ def get_dataset(config, *args, **kwargs):
         return dataset, {"train": dataset, "test": dataset}
     elif name == 'pdbbind':
         dataset = PDBBindDataset(root, *args, **kwargs)
+    elif name == 'pl_ext':
+        dataset = PocketLigandPairDatasetV2(root, *args, **kwargs)
     else:
+        
         raise NotImplementedError('Unknown dataset: %s' % name)
     
     # print(config)
 
     if config.with_split:
-        split = torch.load(config.split)
-        subsets = {k: Subset(dataset, indices=v) for k, v in split.items()}
-        return dataset, subsets
+        if hasattr(config, "split") and os.path.exists(config.split):
+            # Load split from file
+            print(f"Loading split from {config.split}")
+            split = torch.load(config.split)
+            subsets = {k: Subset(dataset, indices=v) for k, v in split.items()}
+            return dataset, subsets
+        else:
+            # Create a new split
+            print(f"Creating new split with ratio {config.split_ratio}")
+            subsets = dataset.make_test_split(config.split_ratio)
+            return dataset, subsets
     else:
         return dataset

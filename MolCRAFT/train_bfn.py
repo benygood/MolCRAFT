@@ -13,11 +13,11 @@ import datetime, pytz
 from core.config.config import Config, parse_config
 from core.models.sbdd_train_loop import SBDDTrainLoop
 from core.callbacks.basic import RecoverCallback, GradientClip, NormalizerCallback, EMACallback
-# from core.callbacks.validation_callback import (
-#     ValidationCallback,
+from core.callbacks.validation_callback import (
+    ValidationCallback,
 #     VisualizeMolAndTrajCallback,
 #     DockingTestCallback,
-# )
+)
 
 import core.utils.transforms as trans
 from core.datasets import get_dataset
@@ -66,12 +66,12 @@ def get_dataloader(cfg):
     collate_exclude_keys = ["ligand_nbh_list"]
     # size-1 debug set
     if cfg.debug:
-        debug_set = torch.utils.data.Subset(val_set, [0] * 800)
+        debug_set = torch.utils.data.Subset(val_set, [0] * 40)
         debug_set_val = torch.utils.data.Subset(val_set, [0] * 10)
-        cfg.train.val_freq = 100
+        cfg.train.val_freq = 40
         # get debug set val data batch
         debug_batch_val = next(iter(DataLoader(debug_set_val, batch_size=cfg.train.batch_size, shuffle=False)))
-        print(f"debug batch val: {debug_batch_val.ligand_filename}")
+        print(f"debug batch val: {debug_batch_val.ligand_smiles}")
         train_loader = DataLoader(debug_set,
             batch_size=cfg.train.batch_size,
             shuffle=False,  # set shuffle to False 
@@ -275,13 +275,25 @@ if __name__ == "__main__":
     print(f"The config of this process is:\n{cfg}")
 
     model = SBDDTrainLoop(config=cfg)
-
+    # os.environ["NCCL_SOCKET_IFNAME"] = "lo"
     trainer = pl.Trainer(
-        # deterministic=True,
+        #for debug {
+        # accelerator="cpu",   
+        # limit_train_batches=4,
+        # limit_test_batches=4,
+        # limit_val_batches=4,        
+        devices=[0,1,2,3], 
+        # fast_dev_run=1,
+        #}else{
+        # accelerator="gpu",          # 指定使用GPU
+        # devices=[2,3,4,5,6,7],                  # 使用4张GPU卡（或列表指定卡号如[0,1,3]）
+        strategy="ddp_find_unused_parameters_true",             # 分布式策略（推荐DDP）
+        # accumulate_grad_batches=4,
+        # }
         default_root_dir=cfg.accounting.logdir,
         max_epochs=cfg.train.epochs,
         check_val_every_n_epoch=cfg.train.ckpt_freq,
-        devices=1,
+        # devices=1,
         logger=wandb_logger,
         num_sanity_val_steps=0,
         inference_mode=not cfg.test_only,
@@ -293,16 +305,16 @@ if __name__ == "__main__":
             ),
             GradientClip(max_grad_norm=cfg.train.max_grad_norm),  # time consuming
             NormalizerCallback(normalizer_dict=cfg.data.normalizer_dict),
-            # ValidationCallback(
-            #     dataset=None,  # TODO: implement CrossDockGen & NewBenchmark
-            #     atom_decoder=cfg.data.atom_decoder,
-            #     atom_enc_mode=cfg.data.transform.ligand_atom_mode,
-            #     atom_type_one_hot=False,
-            #     single_bond=True,
-            #     docking_config=cfg.evaluation.docking_config,
-            #     val_freq=cfg.train.val_freq,
-            #     # single_bond=cfg.evaluation.single_bond,  # TODO: check compatibility
-            # ),
+            ValidationCallback(
+                dataset=None,  # TODO: implement CrossDockGen & NewBenchmark
+                atom_decoder=cfg.data.atom_decoder,
+                atom_enc_mode=cfg.data.transform.ligand_atom_mode,
+                atom_type_one_hot=False,
+                single_bond=True,
+                docking_config=cfg.evaluation.docking_config,
+                val_freq=cfg.train.val_freq,
+                # single_bond=cfg.evaluation.single_bond,  # TODO: check compatibility
+            ),
             # VisualizeMolAndTrajCallback(
             #     atom_decoder=cfg.data.atom_decoder,
             #     colors_dic=cfg.data.colors_dic,
