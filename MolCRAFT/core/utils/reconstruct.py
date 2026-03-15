@@ -548,3 +548,21 @@ def reconstruct_from_generated(xyz, atomic_nums, aromatic=None, basic_mode=True)
         raise MolReconError()
 
     return rd_mol
+
+def show_openbabel_mol(mol):
+    # 遍历原子
+    for atom in ob.OBMolAtomIter(mol):
+        # 方法1: 原子序数
+        atomic_num = atom.GetAtomicNum()
+        
+        # 方法2: 元素符号
+        element_symbol = ob.GetSymbol(atomic_num)
+        
+        # 方法3: 使用GetType()获取类型
+        atom_type = atom.GetType()
+        
+        print(f"原子索引: {atom.GetIdx()}")
+        print(f"  原子序数: {atomic_num}")
+        print(f"  元素符号: {element_symbol}")
+        print(f"  原子类型: {atom_type}")
+        print("-" * 30)
