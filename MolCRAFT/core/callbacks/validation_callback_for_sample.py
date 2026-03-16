@@ -109,7 +109,7 @@ class DockingTestCallback(Callback):
             
             try:
                 mol = res['mol']
-                ligand_filename = res['ligand_filename']
+                ligand_filename = res['ligand_smiles']
                 mol.SetProp('_Name', ligand_filename)
             
                 Chem.SanitizeMol(mol)

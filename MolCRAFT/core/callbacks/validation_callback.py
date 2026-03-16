@@ -54,7 +54,7 @@ def reconstruct_mol_and_filter_invalid(out_list):
     center_change_list, mol_pos_range_list = [], []
 
     for item in out_list:
-        ligand_filename, pos, atom_type, is_aromatic = item.ligand_filename, item.pos, item.atom_type, item.is_aromatic
+        ligand_smiles, pos, atom_type, is_aromatic = item.ligand_smiles, item.pos, item.atom_type, item.is_aromatic
         protein_pos, protein_v = item.protein_pos, item.protein_atom_feature
         
         pos = pos.cpu().numpy().astype('float64')
@@ -72,7 +72,7 @@ def reconstruct_mol_and_filter_invalid(out_list):
             mol_pos_range = np.linalg.norm(pos.max(axis=0)[0] - pos.min(axis=0)[0])
 
             res = {
-                'mol': mol, 'ligand_filename': ligand_filename, 
+                'mol': mol, 'ligand_smiles': ligand_smiles, 
                 'pred_pos': pos, 'pred_v': atom_type, 'is_aromatic': is_aromatic,
                 'protein_center': protein_center, 'mol_center': mol_center,
                 'center_change': center_change, 'mol_pos_range': mol_pos_range,
@@ -119,13 +119,13 @@ class ValidationCallback(Callback):
 
     def setup(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:
         super().setup(trainer, pl_module, stage)
-        self.metric = CondMolGenMetric(
-            atom_decoder=self.atom_decoder,
-            atom_enc_mode=self.atom_enc_mode,
-            type_one_hot=self.type_one_hot,
-            single_bond=self.single_bond,
-            docking_config=self.docking_config,
-        )
+        # self.metric = CondMolGenMetric(
+        #     atom_decoder=self.atom_decoder,
+        #     atom_enc_mode=self.atom_enc_mode,
+        #     type_one_hot=self.type_one_hot,
+        #     single_bond=self.single_bond,
+        #     docking_config=self.docking_config,
+        # )
 
     def on_train_batch_start(
             self,
@@ -272,9 +272,9 @@ class ValidationCallback(Callback):
             shutil.rmtree(path)
         os.makedirs(path, exist_ok=True)
         torch.save(results, os.path.join(path, f'generated.pt'))
-        
-        out_metrics = self.metric.evaluate(results)
-        torch.save(results, os.path.join(path, f'vina_docked.pt'))
+        # out_metrics = self.metric.evaluate(results)
+        # torch.save(results, os.path.join(path, f'vina_docked.pt'))
+        out_metrics = {}      
         out_metrics.update(recon_dict)
         out_metrics = {f'val/{k}': v for k, v in out_metrics.items()}
         pl_module.log_dict(out_metrics)

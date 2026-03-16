@@ -37,14 +37,15 @@ from core.evaluation.utils import scoring_func
 # from posecheck import PoseCheck
 import numpy as np
 from rdkit import Chem
+import torch
 
 
-def get_dataloader_from_pdb(cfg):
+def get_dataloader_from_pdb(cfg, device_id):
     assert cfg.evaluation.protein_path is not None and cfg.evaluation.ligand_path is not None
     protein_fn, ligand_fn = cfg.evaluation.protein_path, cfg.evaluation.ligand_path
-
+    device = torch.device(f'cuda:{device_id}') 
     # load protein and ligand
-    protein = PDBProtein(protein_fn)
+    protein = PDBProtein(protein_fn, device=device)
     ligand_dict = parse_sdf_file(ligand_fn)
     lig_pos = ligand_dict["pos"]
 
@@ -54,7 +55,7 @@ def get_dataloader_from_pdb(cfg):
     pdb_block_pocket = protein.residues_to_pdb_block(
         protein.query_residues_ligand(ligand_dict, cfg.dynamics.net_config.r_max)
     )
-    pocket = PDBProtein(pdb_block_pocket)
+    pocket = PDBProtein(pdb_block_pocket, device=device)
     pocket_dict = pocket.to_dict_atom()
 
     data = ProteinLigandData.from_protein_ligand_dicts(
@@ -119,7 +120,9 @@ def call(protein_fn, ligand_fn, ckpt_path='./checkpoints/last.ckpt',
     # print(f"The config of this process is:\n{cfg}")
 
     print(protein_fn, ligand_fn)
-    test_loader = get_dataloader_from_pdb(cfg)
+    device_id=1
+   
+    test_loader = get_dataloader_from_pdb(cfg, device_id)
     # wandb_logger.log_hyperparams(cfg.todict())
 
     model = SBDDTrainLoop(config=cfg)
@@ -128,7 +131,7 @@ def call(protein_fn, ligand_fn, ckpt_path='./checkpoints/last.ckpt',
         default_root_dir=cfg.accounting.logdir,
         max_epochs=cfg.train.epochs,
         check_val_every_n_epoch=cfg.train.ckpt_freq,
-        devices=1,
+        devices=[ device_id ],
         # logger=wandb_logger,
         num_sanity_val_steps=0,
         callbacks=[
@@ -266,7 +269,7 @@ if __name__ == '__main__':
     protein_path = sys.argv[1]
     ligand_path = sys.argv[2]
 
-    call(protein_path, ligand_path, num_samples=10)
+    call(protein_path, ligand_path, num_samples=10, sample_num_atoms='ref', ckpt_path="./checkpoints/epoch00-val_loss5.38-mol_stable0.00-complete0.96-vina_score0.00.ckpt")
     # out_fn = 'output/0.sdf'
     # metrics = Metrics(protein_path, ligand_path, out_fn).evaluate()
     # print(json.dumps(metrics, indent=4, cls=NpEncoder))

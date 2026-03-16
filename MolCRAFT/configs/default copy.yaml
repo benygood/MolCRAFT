@@ -15,18 +15,13 @@ dynamics:
   t_min: !SUB ${t_min}
   sigma1_coord: !SUB ${sigma1_coord}
   beta1: !SUB ${beta1}
-  protein_atom_feature_dim: 28 #TODO
+  protein_atom_feature_dim: 27 #TODO
   ligand_atom_feature_dim: 13
   use_discrete_t: !SUB ${use_discrete_t}
   discrete_steps: !SUB ${discrete_steps}
   destination_prediction: !SUB ${destination_prediction}
   sampling_strategy: !SUB ${sampling_strategy}
-
-  # bond generation params
-  num_bond_types: 5             # 0=no-bond, 1=single, 2=double, 3=triple, 4=aromatic
-  beta1_bond: !SUB ${beta1_bond}
-  bond_loss_weight: !SUB ${bond_loss_weight}
-
+  
   # no_diff_coord: !SUB ${no_diff_coord}
   # charge_discretised_loss: !SUB ${charge_discretised_loss}
   node_indicator: True
@@ -40,7 +35,7 @@ dynamics:
       num_layers: 9
       hidden_dim: 128
       n_heads: 16
-      edge_feat_dim: 8  # 4 (PP/PL/LP/LL) + 4 (bond features)
+      edge_feat_dim: 4  # edge type feat
       num_r_gaussian: 20
       knn: 32 # !
       num_node_types: 8
@@ -66,12 +61,12 @@ accounting:
 
 
 data:
-  name: pl_ext # pl, pl_tr
-  path: ./data/complex_ext_v2.csv
+  name: pl # pl, pl_tr
+  path: ./data/crossdocked_v1.1_rmsd1.0_pocket10
+  split:  ./data/crossdocked_pocket10_pose_split.pt
   transform:
     ligand_atom_mode: add_aromatic
   with_split: True
-  split_ratio: 1000
   atom_decoder: ['H', 'C', 'N', 'O', 'F', 'P', 'S', 'Cl']
   colors_dic: ['#FFFFFF99', 'C7', 'C0', 'C3', 'C1', 'C4', 'C8', 'C9', ]
   radius_dic: [0.3, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6]
@@ -87,14 +82,13 @@ visual:
 
 train:
   batch_size: !SUB ${batch_size}
-  num_workers: 0
+  num_workers: 8
   pos_noise_std: !SUB ${pos_noise_std}
   random_rot: !SUB ${random_rot}
   val_freq: 1000
   epochs: !SUB ${epochs}
   resume: !SUB ${resume}
   v_loss_weight: !SUB ${v_loss_weight}
-  bond_loss_weight: !SUB ${bond_loss_weight}
   ckpt_freq: 1
   max_grad_norm: !SUB ${max_grad_norm}
   optimizer: 

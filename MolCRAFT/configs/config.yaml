@@ -65,12 +65,12 @@ dynamics:
     num_node_types: 8
     num_r_gaussian: 20
     num_x2h: 1
-    r_max: 10.0
+    r_max: 8.0
     sync_twoup: false
     x2h_out_fc: false
   node_indicator: true
   pos_init_mode: zero
-  protein_atom_feature_dim: 27
+  protein_atom_feature_dim: 28
   sampling_strategy: end_back_pmf
   sigma1_coord: 0.03
   t_min: 0.0001
