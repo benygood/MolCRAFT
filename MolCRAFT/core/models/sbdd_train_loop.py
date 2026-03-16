@@ -324,18 +324,40 @@ class SBDDTrainLoop(pl.LightningModule):
         # Add predicted bond data if available
         if p0_bond_final is not None and halfedge_index is not None:
             pred_bond_type = p0_bond_final.argmax(dim=-1)  # [E_half]
-            # Convert halfedge_index to ligand-local indices per molecule
-            # Store raw halfedge_index (already ligand-global) and pred_bond_type
+            # Store raw halfedge_index (ligand-global) and pred_bond_type
             out_batch.pred_halfedge_index = halfedge_index
             out_batch.pred_halfedge_type = pred_bond_type
             _slice_dict["pred_halfedge_index"] = halfedge_cum
             _slice_dict["pred_halfedge_type"] = halfedge_cum
-            _inc_dict["pred_halfedge_index"] = out_batch._inc_dict["ligand_element"]
-            _inc_dict["pred_halfedge_type"] = torch.zeros(num_graphs, dtype=torch.long, device=ligand_pos.device)
-
+            _inc_dict["pred_halfedge_index"] = ligand_cum_atoms[:-1]
+            _inc_dict["pred_halfedge_type"] = out_batch._inc_dict["ligand_element"]
+            # _inc_dict["pred_halfedge_index"] = out_batch._inc_dict["ligand_element"]
+            # _inc_dict["pred_halfedge_type"] = torch.zeros(num_graphs, dtype=torch.long, device=ligand_pos.device)
+            
         out_batch._inc_dict.update(_inc_dict)
         out_batch._slice_dict.update(_slice_dict)
         out_data_list = out_batch.to_data_list()
+
+        # Convert global halfedge_index to local indices for each molecule
+        # PyG's to_data_list() should handle this via _inc_dict, but we do it manually to be safe
+        # if p0_bond_final is not None and halfedge_index is not None:
+        #     for mol_idx, item in enumerate(out_data_list):
+        #         # Get halfedge range for this molecule
+        #         he_start = halfedge_cum[mol_idx].item()
+        #         he_end = halfedge_cum[mol_idx + 1].item()
+        #         if he_end > he_start:
+        #             # Extract this molecule's halfedges (global atom indices)
+        #             mol_he_global = halfedge_index[:, he_start:he_end]  # [2, E_mol]
+        #             mol_bond_type = pred_bond_type[he_start:he_end]     # [E_mol]
+
+        #             # Convert to local atom indices (subtract ligand start offset)
+        #             ligand_start = ligand_cum_atoms[mol_idx].item()
+        #             mol_he_local = mol_he_global - ligand_start
+
+        #             # Store local indices in the Data object
+        #             item.pred_halfedge_index = mol_he_local
+        #             item.pred_halfedge_type = mol_bond_type
+
         return out_data_list
 
     def on_train_epoch_end(self) -> None:

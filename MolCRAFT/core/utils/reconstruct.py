@@ -12,11 +12,7 @@ from rdkit import Geometry
 from openbabel import openbabel as ob
 from scipy.spatial.distance import pdist
 from scipy.spatial.distance import squareform
-
-
-class MolReconError(Exception):
-    pass
-
+import traceback
 
 def reachable_r(a, b, seenbonds):
     '''Recursive helper.'''
@@ -295,10 +291,9 @@ def convert_ob_mol_to_rd_mol(ob_mol, struct=None):
             # hydrogens on C fragment get set to nan (shouldn't, but they do)
             rd_mol.GetConformer().SetAtomPosition(i, center)
 
-    try:
-        AllChem.SanitizeMol(rd_mol, AllChem.SANITIZE_ALL ^ AllChem.SANITIZE_KEKULIZE)
-    except:
-        raise MolReconError()
+   
+    AllChem.SanitizeMol(rd_mol, AllChem.SANITIZE_ALL ^ AllChem.SANITIZE_KEKULIZE)
+
     # try:
     #     AllChem.SanitizeMol(rd_mol,AllChem.SANITIZE_ALL^AllChem.SANITIZE_KEKULIZE)
     # except: # mtr22 - don't assume mols will pass this
@@ -540,13 +535,10 @@ def reconstruct_from_generated(xyz, atomic_nums, aromatic=None, basic_mode=True)
 
     mol.PerceiveBondOrders()
     rd_mol = convert_ob_mol_to_rd_mol(mol, struct=xyz)
-    try:
-        # Post-processing
-        rd_mol = postprocess_rd_mol_1(rd_mol)
-        rd_mol = postprocess_rd_mol_2(rd_mol)
-    except:
-        raise MolReconError()
-
+  
+    # Post-processing
+    rd_mol = postprocess_rd_mol_1(rd_mol)
+    rd_mol = postprocess_rd_mol_2(rd_mol)
     return rd_mol
 
 
@@ -603,9 +595,16 @@ def reconstruct_from_generated_with_bonds(xyz, atomic_nums, bond_index, bond_typ
     mol = rd_mol.GetMol()
     try:
         Chem.SanitizeMol(mol)
-    except Exception:
+    except Exception as e:
+        print(f"异常类型: {type(e).__name__}")
+        print(f"异常信息: {e}")
+        # print("堆栈跟踪:")
+        # traceback.print_exc()
+        # print(f"当前分子的 SMILES Before: {Chem.MolToSmiles(mol)}")
         # Fallback to heuristic reconstruction
         mol = reconstruct_from_generated(xyz, atomic_nums, aromatic=aromatic, basic_mode=basic_mode)
+        print(f"当前分子的 SMILES After: {Chem.MolToSmiles(mol)}")
+
     return mol
 
 def show_openbabel_mol(mol):

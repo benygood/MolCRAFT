@@ -18,13 +18,14 @@ import copy
 import glob
 import shutil
 import time
+import traceback
 
 # from core.evaluation.metrics import CondMolGenMetric
 from core.evaluation.utils import convert_atomcloud_to_mol_smiles, save_mol_list
 from core.evaluation.visualization import visualize, visualize_chain
 from core.utils import transforms as trans
 from core.evaluation.utils import timing
-from core.utils.reconstruct import reconstruct_from_generated, MolReconError
+from core.utils.reconstruct import reconstruct_from_generated, reconstruct_from_generated_with_bonds
 
 # this file contains the model which we used to visualize the
 
@@ -56,14 +57,26 @@ def reconstruct_mol_and_filter_invalid(out_list):
     for item in out_list:
         ligand_smiles, pos, atom_type, is_aromatic = item.ligand_smiles, item.pos, item.atom_type, item.is_aromatic
         protein_pos, protein_v = item.protein_pos, item.protein_atom_feature
-        
+
         pos = pos.cpu().numpy().astype('float64')
         atom_type = atom_type.cpu().numpy().astype('int32')
         is_aromatic = is_aromatic.cpu().numpy().astype('bool')
         protein_pos = protein_pos.cpu().numpy().astype('float64')
+
+        # Check for predicted bond data
+        pred_halfedge_index = getattr(item, 'pred_halfedge_index', None)
+        pred_halfedge_type = getattr(item, 'pred_halfedge_type', None)
+
         # TODO turn off basic_mode = False to use predicted aromaticity
         try:
-            mol = reconstruct_from_generated(pos, atom_type, is_aromatic, basic_mode=True)
+            # Prefer using predicted bonds for reconstruction
+            if pred_halfedge_index is not None and pred_halfedge_type is not None:
+                he_idx = pred_halfedge_index.cpu().numpy()
+                he_type = pred_halfedge_type.cpu().numpy()
+                mol = reconstruct_from_generated_with_bonds(pos, atom_type, he_idx, he_type, is_aromatic)
+            else:
+                # Fallback to original OpenBabel heuristic method
+                mol = reconstruct_from_generated(pos, atom_type, is_aromatic, basic_mode=True)
             n_recon += 1
 
             mol_center = pos.mean(axis=0)
@@ -72,7 +85,7 @@ def reconstruct_mol_and_filter_invalid(out_list):
             mol_pos_range = np.linalg.norm(pos.max(axis=0)[0] - pos.min(axis=0)[0])
 
             res = {
-                'mol': mol, 'ligand_smiles': ligand_smiles, 
+                'mol': mol, 'ligand_smiles': ligand_smiles,
                 'pred_pos': pos, 'pred_v': atom_type, 'is_aromatic': is_aromatic,
                 'protein_center': protein_center, 'mol_center': mol_center,
                 'center_change': center_change, 'mol_pos_range': mol_pos_range,
@@ -87,11 +100,15 @@ def reconstruct_mol_and_filter_invalid(out_list):
 
             n_complete += int(complete)
             n_valid += int(validity)
-            res['smiles'] = smiles                    
+            res['smiles'] = smiles
             res['complete'] = complete
             res['validity'] = validity
             results.append(res)
         except Exception as e:
+            print(f"异常类型: {type(e).__name__}")
+            print(f"异常信息: {e}")
+            # print("堆栈跟踪:")
+            # traceback.print_exc()
             continue
 
     return results, {
@@ -142,10 +159,10 @@ class ValidationCallback(Callback):
         trainer: Trainer,
         pl_module: LightningModule,
     ) -> None:
-        
+
         with torch.no_grad():
             pl_module.dynamics.eval()
-            sum_batches, sum_loss, sum_loss_pos, sum_loss_type = 0, 0., 0., 0.
+            sum_batches, sum_loss, sum_loss_pos, sum_loss_type, sum_loss_bond = 0, 0., 0., 0., 0.
             pos_normalizer = torch.tensor(
                 pl_module.cfg.data.normalizer_dict.pos, dtype=torch.float32, device=pl_module.device,
             )
@@ -157,24 +174,29 @@ class ValidationCallback(Callback):
                 batch.protein_pos = batch.protein_pos / pos_normalizer
                 batch.ligand_pos = batch.ligand_pos / pos_normalizer
 
+                # Extract halfedge data for bond generation
+                halfedge_index = getattr(batch, 'ligand_halfedge_index', None)
+                halfedge_type = getattr(batch, 'ligand_halfedge_type', None)
+                batch_halfedge = getattr(batch, 'ligand_halfedge_type_batch', None)
+
                 protein_pos, protein_v, batch_protein, ligand_pos, ligand_v, batch_ligand = (
-                    batch.protein_pos, 
-                    batch.protein_atom_feature.float(), 
-                    batch.protein_element_batch, 
+                    batch.protein_pos,
+                    batch.protein_atom_feature.float(),
+                    batch.protein_element_batch,
                     batch.ligand_pos,
-                    batch.ligand_atom_feature_full, 
+                    batch.ligand_atom_feature_full,
                     batch.ligand_element_batch
                 )
                 # move protein center to origin & ligand correspondingly
                 protein_pos, ligand_pos, offset = center_pos(
-                    protein_pos, ligand_pos, batch_protein, batch_ligand, mode=pl_module.cfg.dynamics.center_pos_mode) #TODO: ugly 
+                    protein_pos, ligand_pos, batch_protein, batch_ligand, mode=pl_module.cfg.dynamics.center_pos_mode) #TODO: ugly
                 num_graphs = batch_protein.max().item() + 1
                 sum_batches += num_graphs * (pl_module.cfg.dynamics.discrete_steps // 10)
-                
+
                 # sample a random timestep for reconstruction loss computation
                 for t in range(0, pl_module.cfg.dynamics.discrete_steps, 10):
                     t = torch.tensor(
-                        [t / float(pl_module.cfg.dynamics.discrete_steps)], 
+                        [t / float(pl_module.cfg.dynamics.discrete_steps)],
                         dtype=ligand_pos.dtype, device=ligand_pos.device
                     ).repeat(num_graphs, 1).index_select(
                         0, batch_ligand
@@ -184,7 +206,7 @@ class ValidationCallback(Callback):
                         t = torch.clamp(t, min=pl_module.dynamics.t_min)  # clamp t to [t_min,1]
 
                     # compute bfn loss  # TODO: convert to reconstruction loss
-                    c_loss, d_loss, discretised_loss = pl_module.dynamics.reconstruction_loss_one_step(
+                    c_loss, d_loss, discretised_loss, bond_loss = pl_module.dynamics.reconstruction_loss_one_step(
                         t,
                         protein_pos=protein_pos,
                         protein_v=protein_v,
@@ -192,16 +214,22 @@ class ValidationCallback(Callback):
                         ligand_pos=ligand_pos,
                         ligand_v=ligand_v,
                         batch_ligand=batch_ligand,
+                        halfedge_index=halfedge_index,
+                        halfedge_type=halfedge_type,
+                        batch_halfedge=batch_halfedge,
                     )
-                    loss = torch.mean(c_loss + pl_module.cfg.train.v_loss_weight * d_loss + discretised_loss)
+                    bond_loss_weight = getattr(pl_module.cfg.train, 'bond_loss_weight', 0.0)
+                    loss = torch.mean(c_loss + pl_module.cfg.train.v_loss_weight * d_loss + bond_loss_weight * bond_loss + discretised_loss)
                     sum_loss += float(loss) * num_graphs
                     sum_loss_pos += float(c_loss.sum())
                     sum_loss_type += float(d_loss.sum())
+                    sum_loss_bond += float(bond_loss.sum())
 
             recon_loss = {
                 "val/recon_loss": sum_loss / sum_batches,
                 "val/recon_loss_pos": sum_loss_pos / sum_batches,
                 "val/recon_loss_type": sum_loss_type / sum_batches,
+                "val/recon_loss_bond": sum_loss_bond / sum_batches,
             }
             return recon_loss
 
@@ -328,9 +356,26 @@ class VisualizeMolAndTrajCallback(Callback):
 
             # move protein center to origin & ligand correspondingly
             protein_pos, ligand_pos, offset = center_pos(
-                protein_pos, ligand_pos, batch_protein, batch_ligand, mode=pl_module.cfg.dynamics.center_pos_mode) #TODO: ugly 
+                protein_pos, ligand_pos, batch_protein, batch_ligand, mode=pl_module.cfg.dynamics.center_pos_mode) #TODO: ugly
             num_graphs = batch_protein.max().item() + 1
-    
+
+            # Build halfedge_index for sampling (all atom pairs i<j per molecule)
+            ligand_num_atoms = scatter_sum(torch.ones_like(batch_ligand), batch_ligand, dim=0)
+            halfedge_index_list = []
+            for idx_mol in range(num_graphs):
+                n = ligand_num_atoms[idx_mol].item()
+                # Get ligand-local halfedge indices
+                he = torch.triu_indices(n, n, offset=1)
+                # Convert to global indices
+                ligand_start_idx = (batch_ligand == idx_mol).nonzero()[0, 0].item()
+                he = he + ligand_start_idx
+                halfedge_index_list.append(he)
+
+            if len(halfedge_index_list) > 0:
+                halfedge_index = torch.cat(halfedge_index_list, dim=1)
+            else:
+                halfedge_index = None
+
             theta_chain, sample_chain, y_chain = pl_module.dynamics.sample(
                 protein_pos=protein_pos,
                 protein_v=protein_v,
@@ -340,6 +385,7 @@ class VisualizeMolAndTrajCallback(Callback):
                 ligand_pos=ligand_pos, # for debug only
                 sample_steps=pl_module.cfg.evaluation.sample_steps,
                 desc='MolVis',
+                halfedge_index=halfedge_index,
             )
 
             # restore the protein position

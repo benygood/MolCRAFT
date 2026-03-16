@@ -68,6 +68,7 @@ def get_dataloader(cfg):
     if cfg.debug:
         debug_set = torch.utils.data.Subset(val_set, [0] * 40)
         debug_set_val = torch.utils.data.Subset(val_set, [0] * 10)
+        cfg.train.batch_size=2
         cfg.train.val_freq = 40
         # get debug set val data batch
         debug_batch_val = next(iter(DataLoader(debug_set_val, batch_size=cfg.train.batch_size, shuffle=False)))
@@ -286,7 +287,7 @@ if __name__ == "__main__":
         # limit_train_batches=4,
         # limit_test_batches=4,
         # limit_val_batches=4,        
-        devices=[0,1,2,3], 
+        # devices=[0], 
         # fast_dev_run=1,
         #}else{
         # accelerator="gpu",          # 指定使用GPU
