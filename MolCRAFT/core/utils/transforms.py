@@ -261,11 +261,32 @@ class FeaturizeLigandAtom(object):
 
 class FeaturizeLigandBond(object):
 
-    def __init__(self):
+    def __init__(self, num_bond_types=4):
+        """
+        Build halfedge_index (all ligand atom pairs i<j) and halfedge_type.
+        Args:
+            num_bond_types: number of real bond types (1=single,2=double,3=triple,4=aromatic).
+                            Type 0 = no bond. Total classes = num_bond_types + 1.
+        """
         super().__init__()
+        self.num_bond_types = num_bond_types
+        self.num_edge_types = num_bond_types + 1  # +1 for no-bond (type 0)
 
     def __call__(self, data: ProteinLigandData):
-        data.ligand_bond_feature = F.one_hot(data.ligand_bond_type - 1, num_classes=len(utils_data.BOND_TYPES))
+        n_atoms = data.ligand_element.size(0)
+
+        # Build NxN bond type matrix from existing bond_index / bond_type
+        edge_type_mat = torch.zeros([n_atoms, n_atoms], dtype=torch.long)
+        bond_index = data.ligand_bond_index   # [2, E_bond], bidirectional
+        bond_type = data.ligand_bond_type     # [E_bond], values 1-4
+        edge_type_mat[bond_index[0], bond_index[1]] = bond_type
+
+        # All unique pairs (i < j) => halfedge_index
+        halfedge_index = torch.triu_indices(n_atoms, n_atoms, offset=1)  # [2, N*(N-1)/2]
+        halfedge_type = edge_type_mat[halfedge_index[0], halfedge_index[1]]  # 0-4
+
+        data.ligand_halfedge_index = halfedge_index
+        data.ligand_halfedge_type = halfedge_type
         return data
 
 

@@ -4,7 +4,7 @@ import numpy as np
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
 
-FOLLOW_BATCH = ('protein_element', 'ligand_element', 'ligand_bond_type',)
+FOLLOW_BATCH = ('protein_element', 'ligand_element', 'ligand_bond_type', 'ligand_halfedge_type',)
 
 
 class ProteinLigandData(Data):
@@ -31,6 +31,8 @@ class ProteinLigandData(Data):
 
     def __inc__(self, key, value, *args, **kwargs):
         if key == 'ligand_bond_index':
+            return self['ligand_element'].size(0)
+        elif key == 'ligand_halfedge_index':
             return self['ligand_element'].size(0)
         else:
             return super().__inc__(key, value)

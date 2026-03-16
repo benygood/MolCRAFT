@@ -55,6 +55,11 @@ class SBDDTrainLoop(pl.LightningModule):
             batch.ligand_atom_feature_full,
             batch.ligand_element_batch,
         )  # get the data from the batch
+
+        # Extract halfedge data for bond generation
+        halfedge_index = getattr(batch, 'ligand_halfedge_index', None)
+        halfedge_type = getattr(batch, 'ligand_halfedge_type', None)
+        batch_halfedge = getattr(batch, 'ligand_halfedge_type_batch', None)
         # batch is a data object
         # protein_pos: [N_pro,3]
         # protein_v: [N_pro,27]
@@ -103,7 +108,7 @@ class SBDDTrainLoop(pl.LightningModule):
             t = torch.clamp(t, min=self.dynamics.t_min)  # clamp t to [t_min,1]
 
         t4 = time()
-        c_loss, d_loss, discretised_loss = self.dynamics.loss_one_step(
+        c_loss, d_loss, discretised_loss, bond_loss = self.dynamics.loss_one_step(
             t,
             protein_pos=gt_protein_pos,
             protein_v=protein_v,
@@ -111,11 +116,14 @@ class SBDDTrainLoop(pl.LightningModule):
             ligand_pos=ligand_pos,
             ligand_v=ligand_v,
             batch_ligand=batch_ligand,
+            halfedge_index=halfedge_index,
+            halfedge_type=halfedge_type,
+            batch_halfedge=batch_halfedge,
         )
 
         # here the discretised_loss is close for current version.
-
-        loss = torch.mean(c_loss + self.cfg.train.v_loss_weight * d_loss + discretised_loss)
+        bond_loss_weight = getattr(self.cfg.train, 'bond_loss_weight', 0.0)
+        loss = torch.mean(c_loss + self.cfg.train.v_loss_weight * d_loss + discretised_loss + bond_loss_weight * bond_loss)
 
         t5 = time()
         self.log_dict(
@@ -129,8 +137,9 @@ class SBDDTrainLoop(pl.LightningModule):
         )
         self.log_dict(
             {
-                'loss_pos': c_loss.mean().item(), 
+                'loss_pos': c_loss.mean().item(),
                 'loss_type': d_loss.mean().item(),
+                'loss_bond': bond_loss.mean().item(),
                 'loss_c_ratio': c_loss.mean().item() / loss.item(),
             },
             on_step=True,
@@ -214,8 +223,34 @@ class SBDDTrainLoop(pl.LightningModule):
         else:
             raise ValueError(f"sample_num_atoms mode: {sample_num_atoms} not supported")
         ligand_cum_atoms = torch.cat([
-            torch.tensor([0], dtype=torch.long, device=ligand_pos.device), 
+            torch.tensor([0], dtype=torch.long, device=ligand_pos.device),
             ligand_num_atoms.cumsum(dim=0)
+        ])
+
+        # Build halfedge_index for sampling (all atom pairs i<j per molecule)
+        halfedge_index_list = []
+        for idx_mol in range(num_graphs):
+            n = ligand_num_atoms[idx_mol].item()
+            he = torch.triu_indices(n, n, offset=1) + ligand_cum_atoms[idx_mol].item()
+            halfedge_index_list.append(he)
+        if len(halfedge_index_list) > 0:
+            halfedge_index = torch.cat(halfedge_index_list, dim=1).to(ligand_pos.device)
+            batch_halfedge = torch.cat([
+                torch.full((he.size(1),), i, dtype=torch.long)
+                for i, he in enumerate(halfedge_index_list)
+            ]).to(ligand_pos.device)
+        else:
+            halfedge_index = None
+            batch_halfedge = None
+
+        # halfedge cumulative counts for slicing output
+        halfedge_counts = torch.tensor(
+            [he.size(1) for he in halfedge_index_list],
+            dtype=torch.long, device=ligand_pos.device
+        )
+        halfedge_cum = torch.cat([
+            torch.tensor([0], dtype=torch.long, device=ligand_pos.device),
+            halfedge_counts.cumsum(dim=0)
         ])
 
         # TODO reuse for visualization and test
@@ -230,11 +265,14 @@ class SBDDTrainLoop(pl.LightningModule):
             n_nodes=num_graphs,
             # ligand_pos=ligand_pos,  # for debug only
             desc=desc,
+            halfedge_index=halfedge_index,
+            batch_halfedge=batch_halfedge,
         )
 
         # restore ligand to original position
-        final = sample_chain[-1]  # mu_pos_final, k_final, k_hat_final
+        final = sample_chain[-1]  # mu_pos_final, k_final, k_hat_final, p0_bond_final
         pred_pos, one_hot = final[0] + offset[batch_ligand], final[1]
+        p0_bond_final = final[3] if len(final) > 3 else None
 
         # along with normalizer
         pred_pos = pred_pos * torch.tensor(
@@ -282,6 +320,19 @@ class SBDDTrainLoop(pl.LightningModule):
             "is_aromatic": out_batch._inc_dict["ligand_element"],
             # "mol": out_batch._inc_dict["ligand_filename"],
         }
+
+        # Add predicted bond data if available
+        if p0_bond_final is not None and halfedge_index is not None:
+            pred_bond_type = p0_bond_final.argmax(dim=-1)  # [E_half]
+            # Convert halfedge_index to ligand-local indices per molecule
+            # Store raw halfedge_index (already ligand-global) and pred_bond_type
+            out_batch.pred_halfedge_index = halfedge_index
+            out_batch.pred_halfedge_type = pred_bond_type
+            _slice_dict["pred_halfedge_index"] = halfedge_cum
+            _slice_dict["pred_halfedge_type"] = halfedge_cum
+            _inc_dict["pred_halfedge_index"] = out_batch._inc_dict["ligand_element"]
+            _inc_dict["pred_halfedge_type"] = torch.zeros(num_graphs, dtype=torch.long, device=ligand_pos.device)
+
         out_batch._inc_dict.update(_inc_dict)
         out_batch._slice_dict.update(_slice_dict)
         out_data_list = out_batch.to_data_list()

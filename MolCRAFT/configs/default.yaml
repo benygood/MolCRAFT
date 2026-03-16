@@ -21,7 +21,12 @@ dynamics:
   discrete_steps: !SUB ${discrete_steps}
   destination_prediction: !SUB ${destination_prediction}
   sampling_strategy: !SUB ${sampling_strategy}
-  
+
+  # bond generation params
+  num_bond_types: 5             # 0=no-bond, 1=single, 2=double, 3=triple, 4=aromatic
+  beta1_bond: !SUB ${beta1_bond}
+  bond_loss_weight: !SUB ${bond_loss_weight}
+
   # no_diff_coord: !SUB ${no_diff_coord}
   # charge_discretised_loss: !SUB ${charge_discretised_loss}
   node_indicator: True
@@ -35,7 +40,7 @@ dynamics:
       num_layers: 9
       hidden_dim: 128
       n_heads: 16
-      edge_feat_dim: 4  # edge type feat
+      edge_feat_dim: 8  # 4 (PP/PL/LP/LL) + 4 (bond features)
       num_r_gaussian: 20
       knn: 32 # !
       num_node_types: 8
@@ -89,6 +94,7 @@ train:
   epochs: !SUB ${epochs}
   resume: !SUB ${resume}
   v_loss_weight: !SUB ${v_loss_weight}
+  bond_loss_weight: !SUB ${bond_loss_weight}
   ckpt_freq: 1
   max_grad_norm: !SUB ${max_grad_norm}
   optimizer: 

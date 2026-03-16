@@ -165,7 +165,7 @@ class AttentionLayerO2TwoUpdateNodeGeneral(nn.Module):
         for i in range(self.num_x2h):
             self.x2h_layers.append(
                 BaseX2HAttLayer(hidden_dim, hidden_dim, hidden_dim, n_heads, edge_feat_dim,
-                                r_feat_dim=num_r_gaussian * 4,
+                                r_feat_dim=num_r_gaussian * edge_feat_dim,
                                 act_fn=act_fn, norm=norm,
                                 ew_net_type=self.ew_net_type, out_fc=self.x2h_out_fc)
             )
@@ -173,7 +173,7 @@ class AttentionLayerO2TwoUpdateNodeGeneral(nn.Module):
         for i in range(self.num_h2x):
             self.h2x_layers.append(
                 BaseH2XAttLayer(hidden_dim, hidden_dim, hidden_dim, n_heads, edge_feat_dim,
-                                r_feat_dim=num_r_gaussian * 4,
+                                r_feat_dim=num_r_gaussian * edge_feat_dim,
                                 act_fn=act_fn, norm=norm,
                                 ew_net_type=self.ew_net_type)
             )
@@ -299,7 +299,9 @@ class UniTransformerO2TwoUpdateGeneral(nn.Module):
         edge_type = F.one_hot(edge_type, num_classes=4)
         return edge_type
 
-    def forward(self, h, x, mask_ligand, batch, return_all=False, fix_x=False):
+    def forward(self, h, x, mask_ligand, batch,
+                bond_edge_feat=None, halfedge_index=None,
+                return_all=False, fix_x=False):
 
         all_x = [x]
         all_h = [h]
@@ -308,8 +310,44 @@ class UniTransformerO2TwoUpdateGeneral(nn.Module):
             edge_index = self._connect_edge(x, mask_ligand, batch)
             src, dst = edge_index
 
-            # edge type (dim: 4)
-            edge_type = self._build_edge_type(edge_index, mask_ligand)
+            # edge type (dim: 4 base)
+            edge_type = self._build_edge_type(edge_index, mask_ligand)  # [E, 4]
+
+            # Inject bond features into LL edges
+            if bond_edge_feat is not None and halfedge_index is not None:
+                bond_feat_for_knn = torch.zeros(
+                    edge_index.size(1), bond_edge_feat.size(-1), device=h.device
+                )
+                # Find LL edges in KNN graph
+                is_ll = mask_ligand[src] & mask_ligand[dst]
+                if is_ll.any():
+                    ll_src = src[is_ll]
+                    ll_dst = dst[is_ll]
+                    # Convert global indices to ligand-local indices
+                    ligand_indices = mask_ligand.nonzero().squeeze(-1)
+                    global_to_local = torch.zeros(h.size(0), dtype=torch.long, device=h.device)
+                    global_to_local[ligand_indices] = torch.arange(len(ligand_indices), device=h.device)
+                    local_src = global_to_local[ll_src]
+                    local_dst = global_to_local[ll_dst]
+                    # Ensure i < j for halfedge lookup
+                    pair_a = torch.min(local_src, local_dst)
+                    pair_b = torch.max(local_src, local_dst)
+                    n_lig = ligand_indices.size(0)
+                    query_keys = pair_a * n_lig + pair_b
+                    he_keys = halfedge_index[0] * n_lig + halfedge_index[1]
+                    # Lookup via searchsorted (he_keys is sorted since triu_indices produces sorted pairs)
+                    lookup_idx = torch.searchsorted(he_keys, query_keys)
+                    lookup_idx = lookup_idx.clamp(max=he_keys.size(0) - 1)
+                    valid = he_keys[lookup_idx] == query_keys
+                    valid_ll_positions = is_ll.nonzero().squeeze(-1)[valid]
+                    bond_feat_for_knn[valid_ll_positions] = bond_edge_feat[lookup_idx[valid]]
+                # Concatenate bond features to edge_type: [E, 4] -> [E, 4+bond_dim]
+                edge_type = torch.cat([edge_type.float(), bond_feat_for_knn], dim=-1)
+            elif self.edge_feat_dim > 4:
+                # Pad edge_type to match expected edge_feat_dim when no bond features
+                pad = torch.zeros(edge_index.size(1), self.edge_feat_dim - 4, device=h.device)
+                edge_type = torch.cat([edge_type.float(), pad], dim=-1)
+
             if self.ew_net_type == 'global':
                 dist = torch.norm(x[dst] - x[src], p=2, dim=-1, keepdim=True)
                 dist_feat = self.distance_expansion(dist)

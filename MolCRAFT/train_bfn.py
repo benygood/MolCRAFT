@@ -45,8 +45,8 @@ def get_dataloader(cfg):
         ligand_featurizer = trans.FeaturizeLigandAtom(cfg.data.transform.ligand_atom_mode)
         transform_list = [
             protein_featurizer,
-            ligand_featurizer, 
-            # trans.FeaturizeLigandBond(),
+            ligand_featurizer,
+            trans.FeaturizeLigandBond(),
         ]
 
         transform = Compose(transform_list)
@@ -189,6 +189,10 @@ if __name__ == "__main__":
     parser.add_argument('--scheduler', type=str, default='plateau', choices=['cosine', 'plateau'])
     parser.add_argument('--weight_decay', type=float, default=0)
     parser.add_argument('--max_grad_norm', type=str, default='Q')  # '8.0' for
+
+    # bond generation params
+    parser.add_argument('--beta1_bond', type=float, default=1.5)
+    parser.add_argument('--bond_loss_weight', type=float, default=1.0)
 
     # bfn params
     parser.add_argument("--sigma1_coord", type=float, default=0.03)

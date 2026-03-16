@@ -548,3 +548,62 @@ def reconstruct_from_generated(xyz, atomic_nums, aromatic=None, basic_mode=True)
         raise MolReconError()
 
     return rd_mol
+
+
+def reconstruct_from_generated_with_bonds(xyz, atomic_nums, bond_index, bond_type,
+                                          aromatic=None, basic_mode=True):
+    """
+    Build RDKit mol directly from generated bond types (no OpenBabel heuristics).
+    Args:
+        xyz: [N, 3] coordinates (numpy array or list)
+        atomic_nums: [N] atomic numbers (list of int)
+        bond_index: [2, E] atom pair indices (i < j) for predicted bonds
+        bond_type: [E] bond types (0=no-bond, 1=single, 2=double, 3=triple, 4=aromatic)
+        aromatic: optional, not used here but kept for API compat
+        basic_mode: not used, kept for API compat
+    Returns:
+        RDKit Mol object
+    Fallback:
+        If sanitization fails, falls back to reconstruct_from_generated
+    """
+    from rdkit import Chem
+
+    if isinstance(xyz, np.ndarray):
+        xyz = xyz.tolist()
+    if isinstance(atomic_nums, np.ndarray):
+        atomic_nums = atomic_nums.tolist()
+
+    n_atoms = len(atomic_nums)
+    rd_mol = Chem.RWMol()
+    rd_conf = Chem.Conformer(n_atoms)
+
+    for i, atom_num in enumerate(atomic_nums):
+        rd_atom = Chem.Atom(int(atom_num))
+        rd_mol.AddAtom(rd_atom)
+        rd_conf.SetAtomPosition(i, Geometry.Point3D(*xyz[i]))
+    rd_mol.AddConformer(rd_conf)
+
+    BOND_MAP = {
+        1: Chem.BondType.SINGLE,
+        2: Chem.BondType.DOUBLE,
+        3: Chem.BondType.TRIPLE,
+        4: Chem.BondType.AROMATIC,
+    }
+
+    for idx in range(bond_index.shape[1]):
+        i_atom = int(bond_index[0, idx])
+        j_atom = int(bond_index[1, idx])
+        bt = int(bond_type[idx])
+        if bt in BOND_MAP and i_atom < j_atom:
+            rd_mol.AddBond(i_atom, j_atom, BOND_MAP[bt])
+            if bt == 4:
+                rd_mol.GetAtomWithIdx(i_atom).SetIsAromatic(True)
+                rd_mol.GetAtomWithIdx(j_atom).SetIsAromatic(True)
+
+    mol = rd_mol.GetMol()
+    try:
+        Chem.SanitizeMol(mol)
+    except Exception:
+        # Fallback to heuristic reconstruction
+        mol = reconstruct_from_generated(xyz, atomic_nums, aromatic=aromatic, basic_mode=basic_mode)
+    return mol
