@@ -104,6 +104,9 @@ class BFN4SBDDScoreModel(BFNBase):
         num_bond_types=5,
         beta1_bond=1.5,
         bond_loss_weight=1.0,
+        # phased diffusion params (MolDiff-style)
+        bond_time_ratio=0.6,
+        bond_loss_cutoff=0.6,
     ):
         super(BFN4SBDDScoreModel, self).__init__()
         # if include_charge:
@@ -151,6 +154,12 @@ class BFN4SBDDScoreModel(BFNBase):
         self.beta1_bond = torch.tensor(beta1_bond, dtype=torch.float32)
         self.bond_loss_weight = bond_loss_weight
 
+        # Phased diffusion parameters (MolDiff-style)
+        # In sampling (0->1), bonds start recovering at t=bond_time_ratio
+        # In training, bond loss is computed only when t >= bond_loss_cutoff
+        self.bond_time_ratio = bond_time_ratio
+        self.bond_loss_cutoff = bond_loss_cutoff
+
         # Bond embedding: noisy bond theta -> edge feature for transformer LL edges
         # Output dim = edge_feat_dim - 4 (since it's concatenated with 4-dim edge_type)
         bond_emb_input_dim = num_bond_types + self.time_emb_dim
@@ -190,6 +199,7 @@ class BFN4SBDDScoreModel(BFNBase):
         gamma_coord,
         theta_bond_t=None,      # [E_half, num_bond_types], noisy bond params
         halfedge_index=None,    # [2, E_half], ligand-local indices
+        t_bond_effective=None,  # [E_half, 1], effective time for bond (phased diffusion)
         return_all=False,  # legacy from targetdiff
         fix_x=False,
     ):
@@ -253,9 +263,13 @@ class BFN4SBDDScoreModel(BFNBase):
         if theta_bond_t is not None and halfedge_index is not None:
             theta_bond_input = 2 * theta_bond_t - 1  # from [0,1] to [-1,1]
             if self.time_emb_dim > 0:
-                # Use average time of halfedge endpoint atoms
-                bond_time = (time[halfedge_index[0]] + time[halfedge_index[1]]) / 2
-                bond_time_emb = self.time_emb_layer(bond_time)
+                # Use effective time for bond (phased diffusion) if provided
+                if t_bond_effective is not None:
+                    bond_time_emb = self.time_emb_layer(t_bond_effective)
+                else:
+                    # Fallback: Use average time of halfedge endpoint atoms
+                    bond_time = time[halfedge_index[0]]
+                    bond_time_emb = self.time_emb_layer(bond_time)
                 theta_bond_input = torch.cat([theta_bond_input, bond_time_emb], -1)
             bond_edge_feat = self.bond_emb(theta_bond_input)  # [E_half, edge_feat_dim]
 
@@ -400,15 +414,27 @@ class BFN4SBDDScoreModel(BFNBase):
         )  # [N, K]
 
         # Bond BFN: Bayesian update for bond types (discrete variable)
+        # Phased diffusion: bonds use delayed effective time
         theta_bond = None
         t_bond = None
+        t_bond_effective = None
         halfedge_type_onehot = None
         if halfedge_type is not None and halfedge_index is not None:
             K_bond = self.num_bond_types
             halfedge_type_onehot = F.one_hot(halfedge_type, K_bond).float()  # [E_half, 5]
-            t_bond = (t[halfedge_index[0]] + t[halfedge_index[1]]) / 2  # [E_half, 1]
+            t_bond_base = t[halfedge_index[0]] # [E_half, 1]
+            t_bond = t_bond_base  # Keep for compatibility with loss computation
+
+            # Phased diffusion: effective time for bond
+            # t_bond_effective = 0 when t_bond_base < bond_time_ratio (Phase 1)
+            # t_bond_effective = (t_bond_base - bond_time_ratio) / (1 - bond_time_ratio) in Phase 2
+            t_bond_effective = torch.clamp(
+                (t_bond_base - self.bond_time_ratio) / (1 - self.bond_time_ratio),
+                min=0.0, max=1.0
+            )  # [E_half, 1]
+
             theta_bond = self.discrete_var_bayesian_update(
-                t_bond, beta1=self.beta1_bond, x=halfedge_type_onehot, K=K_bond
+                t_bond_effective, beta1=self.beta1_bond, x=halfedge_type_onehot, K=K_bond
             )  # [E_half, K_bond]
 
         # 2. Compute output distribution parameters for p_O (x' | θ; t) (x_hat or k^(d) logits)
@@ -425,6 +451,7 @@ class BFN4SBDDScoreModel(BFNBase):
             gamma_coord=gamma_coord,
             theta_bond_t=theta_bond,
             halfedge_index=halfedge_index,
+            t_bond_effective=t_bond_effective,
         )  # [N, 3], [N, K], [?], [E_half, K_bond] or None
         # if self.include_charge:
         #     k_c = torch.tensor(self.k_c).to(self.device).unsqueeze(-1).unsqueeze(0)
@@ -505,28 +532,37 @@ class BFN4SBDDScoreModel(BFNBase):
         discretized_loss = torch.zeros_like(closs)
 
         # Bond BFN loss (discrete variable, same as atom type)
+        # Phased diffusion: only compute bond loss in Phase 2 (t_bond_base >= bond_loss_cutoff)
         if halfedge_type is not None and p0_bond is not None:
             K_bond = self.num_bond_types
-            if not self.use_discrete_t:
-                bond_loss = self.ctime4discrete_loss(
-                    t=t_bond,
-                    beta1=self.beta1_bond,
-                    one_hot_x=halfedge_type_onehot,
-                    p_0=p0_bond,
-                    K=K_bond,
-                    segment_ids=batch_halfedge,
-                )  # [B,]
+            # Check if in Phase 2 (t_bond_base >= bond_loss_cutoff, i.e., t_bond_effective > 0)
+            in_phase_two = (t_bond >= self.bond_loss_cutoff).squeeze(-1)  # [E_half,]
+
+            if in_phase_two.any():
+                # Only compute bond loss for halfedges in Phase 2
+                if not self.use_discrete_t:
+                    bond_loss = self.ctime4discrete_loss(
+                        t=t_bond_effective[in_phase_two],
+                        beta1=self.beta1_bond,
+                        one_hot_x=halfedge_type_onehot[in_phase_two],
+                        p_0=p0_bond[in_phase_two],
+                        K=K_bond,
+                        segment_ids=batch_halfedge[in_phase_two],
+                    )  # [B,]
+                else:
+                    i_bond = (t_bond_effective[in_phase_two] * self.discrete_steps).int() + 1
+                    bond_loss = self.dtime4discrete_loss_prob(
+                        i=i_bond,
+                        N=self.discrete_steps,
+                        beta1=self.beta1_bond,
+                        one_hot_x=halfedge_type_onehot[in_phase_two],
+                        p_0=p0_bond[in_phase_two],
+                        K=K_bond,
+                        segment_ids=batch_halfedge[in_phase_two],
+                    )
             else:
-                i_bond = (t_bond * self.discrete_steps).int() + 1
-                bond_loss = self.dtime4discrete_loss_prob(
-                    i=i_bond,
-                    N=self.discrete_steps,
-                    beta1=self.beta1_bond,
-                    one_hot_x=halfedge_type_onehot,
-                    p_0=p0_bond,
-                    K=K_bond,
-                    segment_ids=batch_halfedge,
-                )
+                # Phase 1: no bond loss
+                bond_loss = torch.zeros_like(closs)
         else:
             bond_loss = torch.zeros_like(closs)
 
@@ -598,6 +634,11 @@ class BFN4SBDDScoreModel(BFNBase):
         theta_traj = []
         y_traj = []
 
+        # Phased diffusion: compute phase boundary step
+        # Phase 1 (i <= phase_one_steps): only atoms recover, bonds stay at prior
+        # Phase 2 (i > phase_one_steps): bonds start recovering
+        phase_one_steps = int(sample_steps * self.bond_time_ratio)
+
         # TODO: debug
         mu_pos_t = mu_pos_t[batch_ligand]
         theta_h_t = theta_h_t[batch_ligand]
@@ -619,6 +660,15 @@ class BFN4SBDDScoreModel(BFNBase):
             # debug only
             # mu_coord_gt, gamma_coord_gt = self.continuous_var_bayesian_update(t, sigma1=self.sigma1_coord, x=ligand_pos)
 
+            # Compute effective bond time for phased diffusion
+            t_bond_effective = None
+            if theta_bond_t is not None and halfedge_index is not None:
+                t_bond_base = t[halfedge_index[0]]
+                t_bond_effective = torch.clamp(
+                    (t_bond_base - self.bond_time_ratio) / (1 - self.bond_time_ratio),
+                    min=0.0, max=1.0
+                )
+
             coord_pred, p0_h_pred, k_hat, p0_bond_pred = self.interdependency_modeling(
                 time=t,
                 protein_pos=protein_pos,
@@ -632,6 +682,7 @@ class BFN4SBDDScoreModel(BFNBase):
                 gamma_coord=gamma_coord,
                 theta_bond_t=theta_bond_t,
                 halfedge_index=halfedge_index,
+                t_bond_effective=t_bond_effective,
                 # TODO: add charge
                 # mu_charge_t=mu_charge_t,
                 # gamma_charge=gamma_charge,
@@ -705,16 +756,22 @@ class BFN4SBDDScoreModel(BFNBase):
                 theta_prime = torch.exp(y_h) * theta_h_t  # e^y * θ_{i−1}
                 theta_h_t = theta_prime / theta_prime.sum(dim=-1, keepdim=True)
 
-                # Bond BFN vanilla update
+                # Bond BFN vanilla update — Phase 2 only (phased diffusion)
                 if theta_bond_t is not None and p0_bond_pred is not None:
-                    alpha_bond = self.beta1_bond * (2 * i - 1) / (sample_steps ** 2)
-                    k_bond = torch.distributions.Categorical(probs=p0_bond_pred.clamp(min=1e-6)).sample()
-                    e_k_bond = F.one_hot(k_bond, num_classes=K_bond).float()
-                    mean_bond = alpha_bond * (K_bond * e_k_bond - 1)
-                    std_bond = torch.full_like(mean_bond, fill_value=alpha_bond * K_bond).sqrt()
-                    y_bond = mean_bond + std_bond * torch.randn_like(e_k_bond)
-                    theta_bond_prime = torch.exp(y_bond) * theta_bond_t
-                    theta_bond_t = theta_bond_prime / theta_bond_prime.sum(dim=-1, keepdim=True)
+                    if i > phase_one_steps:
+                        # Bond effective step: recount from phase 2 start
+                        # This ensures ∑α_i = β1_bond over the bond steps
+                        i_bond_eff = i - phase_one_steps
+                        n_bond_steps = sample_steps - phase_one_steps
+                        alpha_bond = self.beta1_bond * (2 * i_bond_eff - 1) / (n_bond_steps ** 2)
+                        k_bond = torch.distributions.Categorical(probs=p0_bond_pred.clamp(min=1e-6)).sample()
+                        e_k_bond = F.one_hot(k_bond, num_classes=K_bond).float()
+                        mean_bond = alpha_bond * (K_bond * e_k_bond - 1)
+                        std_bond = torch.full_like(mean_bond, fill_value=alpha_bond * K_bond).sqrt()
+                        y_bond = mean_bond + std_bond * torch.randn_like(e_k_bond)
+                        theta_bond_prime = torch.exp(y_bond) * theta_bond_t
+                        theta_bond_t = theta_bond_prime / theta_bond_prime.sum(dim=-1, keepdim=True)
+                    # Phase 1: theta_bond_t stays at prior (1/K uniform)
 
             elif "end_back" in self.sampling_strategy:
                 t = torch.ones((n_nodes, 1)).to(self.device) * i  / sample_steps #next time step
@@ -732,20 +789,27 @@ class BFN4SBDDScoreModel(BFNBase):
                 mu_pos_t = self.continuous_var_bayesian_update(t, sigma1=self.sigma1_coord, x=coord_pred)[0]
                 sample_traj.append((coord_pred, sample_pred, k_hat))
 
-                # Bond BFN end_back update
+                # Bond BFN end_back update — Phase 2 only (phased diffusion)
                 if theta_bond_t is not None and p0_bond_pred is not None:
-                    t_bond_next = (t[halfedge_index[0]] + t[halfedge_index[1]]) / 2
-                    if self.sampling_strategy == "end_back_pmf":
-                        theta_bond_t = self.discrete_var_bayesian_update(
-                            t_bond_next, beta1=self.beta1_bond, x=p0_bond_pred, K=K_bond
+                    if i > phase_one_steps:
+                        # Use effective time for bond bayesian update
+                        t_bond_next_base = t[halfedge_index[0]]
+                        t_bond_next_eff = torch.clamp(
+                            (t_bond_next_base - self.bond_time_ratio) / (1 - self.bond_time_ratio),
+                            min=0.0, max=1.0
                         )
-                    else:
-                        # For end_back and end_back_mode, use mode of bond prediction
-                        bond_mode = torch.argmax(p0_bond_pred, dim=-1)
-                        bond_mode_pred = F.one_hot(bond_mode, num_classes=K_bond).float()
-                        theta_bond_t = self.discrete_var_bayesian_update(
-                            t_bond_next, beta1=self.beta1_bond, x=bond_mode_pred, K=K_bond
-                        )
+                        if self.sampling_strategy == "end_back_pmf":
+                            theta_bond_t = self.discrete_var_bayesian_update(
+                                t_bond_next_eff, beta1=self.beta1_bond, x=p0_bond_pred, K=K_bond
+                            )
+                        else:
+                            # For end_back and end_back_mode, use mode of bond prediction
+                            bond_mode = torch.argmax(p0_bond_pred, dim=-1)
+                            bond_mode_pred = F.one_hot(bond_mode, num_classes=K_bond).float()
+                            theta_bond_t = self.discrete_var_bayesian_update(
+                                t_bond_next_eff, beta1=self.beta1_bond, x=bond_mode_pred, K=K_bond
+                            )
+                    # Phase 1: theta_bond_t stays at prior (1/K uniform)
 
                 # if i % (sample_steps // 10) == 0:
                     # print(f"theta_h_{i}", theta_h_t)
@@ -821,6 +885,16 @@ class BFN4SBDDScoreModel(BFNBase):
                 # sample_traj.append((coord_pred, sample_pred,k_hat))
 
         # 5. Compute final output distribution parameters for p_O (x' | θ; t)
+        # Compute final t_bond_effective (at t=1, effective = 1.0)
+        t_bond_effective_final = None
+        if halfedge_index is not None:
+            t_final = torch.ones((n_nodes, 1)).to(self.device)[batch_ligand]
+            t_bond_base_final = (t_final[halfedge_index[0]] + t_final[halfedge_index[1]]) / 2
+            t_bond_effective_final = torch.clamp(
+                (t_bond_base_final - self.bond_time_ratio) / (1 - self.bond_time_ratio),
+                min=0.0, max=1.0
+            )  # At t=1, this will be 1.0
+
         mu_pos_final, p0_h_final, k_hat_final, p0_bond_final = self.interdependency_modeling(
             time=torch.ones((n_nodes, 1)).to(self.device)[batch_ligand],
             protein_pos=protein_pos,
@@ -834,6 +908,7 @@ class BFN4SBDDScoreModel(BFNBase):
             # gamma_charge=1 - self.sigma1_charges**2,
             theta_bond_t=theta_bond_t,
             halfedge_index=halfedge_index,
+            t_bond_effective=t_bond_effective_final,
         )
         # TODO delete the following condition
         if not torch.all(p0_h_final.isfinite()):

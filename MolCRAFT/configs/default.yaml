@@ -1,4 +1,4 @@
-project_name: &_project_name !ENV "${LOGNAME}_bfn_sbdd"
+project_name: &_project_name !ENV "${LOGNAME}_bond_added"
 exp_name: &_exp_name !SUB ${exp_name}
 revision: &_revision !SUB ${revision}
 debug: !SUB ${debug}
@@ -26,6 +26,10 @@ dynamics:
   num_bond_types: 5             # 0=no-bond, 1=single, 2=double, 3=triple, 4=aromatic
   beta1_bond: !SUB ${beta1_bond}
   bond_loss_weight: !SUB ${bond_loss_weight}
+
+  # phased diffusion params (MolDiff-style)
+  bond_time_ratio: !SUB ${bond_time_ratio}       # 键开始恢复的时间比例，默认 0.6
+  bond_loss_cutoff: !SUB ${bond_loss_cutoff}     # 小于此时间不计算键损失，默认 0.6
 
   # no_diff_coord: !SUB ${no_diff_coord}
   # charge_discretised_loss: !SUB ${charge_discretised_loss}
@@ -90,7 +94,7 @@ train:
   num_workers: 0
   pos_noise_std: !SUB ${pos_noise_std}
   random_rot: !SUB ${random_rot}
-  val_freq: 1000
+  val_freq: 2000
   epochs: !SUB ${epochs}
   resume: !SUB ${resume}
   v_loss_weight: !SUB ${v_loss_weight}

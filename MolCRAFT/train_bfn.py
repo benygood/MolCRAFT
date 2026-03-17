@@ -195,6 +195,12 @@ if __name__ == "__main__":
     parser.add_argument('--beta1_bond', type=float, default=1.5)
     parser.add_argument('--bond_loss_weight', type=float, default=1.0)
 
+    # phased diffusion params (MolDiff-style)
+    parser.add_argument('--bond_time_ratio', type=float, default=0.6,
+                        help='Bond starts to recover at this time ratio (0-1)')
+    parser.add_argument('--bond_loss_cutoff', type=float, default=0.6,
+                        help='Do not compute bond loss when t < this value')
+
     # bfn params
     parser.add_argument("--sigma1_coord", type=float, default=0.03)
     parser.add_argument("--beta1", type=float, default=1.5)
