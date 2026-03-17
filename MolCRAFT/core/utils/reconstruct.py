@@ -546,15 +546,179 @@ def reconstruct_from_generated_with_bonds(xyz, atomic_nums, bond_index, bond_typ
                                           aromatic=None, basic_mode=True):
     """
     Build RDKit mol directly from generated bond types (no OpenBabel heuristics).
+    Delegates to v2 implementation that handles explicit H atoms and charge inference.
+    """
+    return reconstruct_from_generated_with_bonds_v2(
+        xyz, atomic_nums, bond_index, bond_type,
+        aromatic=aromatic, basic_mode=basic_mode,
+    )
+
+
+def _infer_formal_charges(rd_mol):
+    """
+    Infer formal charges for non-carbon atoms based on their current valence
+    and the expected default valence from the periodic table.
+
+    Common patterns handled:
+      - N with 4 bonds (e.g. quaternary amine, protonated amine) -> +1
+      - N with 2 bonds in non-aromatic context -> could be -1 (deprotonated) or neutral (=NH)
+      - O with 1 bond (single bond only, e.g. deprotonated carboxylate) -> -1
+      - O with 3 bonds (e.g. oxonium) -> +1
+      - S with valence patterns analogous to O
+      - P with 4 bonds -> +1
+    """
+    from rdkit import Chem
+    pt = AllChem.GetPeriodicTable()
+
+    for atom in rd_mol.GetAtoms():
+        atomic_num = atom.GetAtomicNum()
+        if atomic_num == 6 or atomic_num == 1:
+            # Carbon and hydrogen: no charge inference needed
+            continue
+
+        total_valence = 0.0
+        for bond in atom.GetBonds():
+            total_valence += bond.GetBondTypeAsDouble()
+        total_valence = int(round(total_valence))
+
+        # Get the list of allowed valences for this element
+        default_valence = pt.GetDefaultValence(atomic_num)
+        # RDKit returns a tuple of allowed valences or a single int
+        if isinstance(default_valence, (list, tuple)):
+            allowed_valences = list(default_valence)
+        else:
+            allowed_valences = [default_valence]
+
+        # If the current valence matches one of the allowed valences, neutral
+        if total_valence in allowed_valences:
+            atom.SetFormalCharge(0)
+            continue
+
+        # Try to find a charge that makes the valence valid
+        # Check charge = +1: valence should match allowed_val + 1
+        # Check charge = -1: valence should match allowed_val - 1
+        charge_set = False
+        for charge in [1, -1, 2, -2]:
+            for av in allowed_valences:
+                if total_valence == av + charge:
+                    atom.SetFormalCharge(charge)
+                    charge_set = True
+                    break
+            if charge_set:
+                break
+
+        if not charge_set:
+            # Heuristic fallback for specific elements
+            if atomic_num == 7:  # Nitrogen
+                if total_valence == 4:
+                    atom.SetFormalCharge(1)
+                elif total_valence == 2 and not atom.GetIsAromatic():
+                    # Could be neutral (imine-like) or charged; default neutral
+                    atom.SetFormalCharge(0)
+            elif atomic_num == 8:  # Oxygen
+                if total_valence == 1:
+                    atom.SetFormalCharge(-1)
+                elif total_valence == 3:
+                    atom.SetFormalCharge(1)
+            elif atomic_num == 16:  # Sulfur
+                if total_valence == 1:
+                    atom.SetFormalCharge(-1)
+                elif total_valence == 3:
+                    atom.SetFormalCharge(1)
+
+
+def _fix_aromatic_ring_consistency(rd_mol):
+    """
+    Ensure aromatic ring consistency: if a ring has most atoms marked aromatic,
+    mark all ring atoms and bonds as aromatic. Also fix partially aromatic rings.
+    """
+    from rdkit import Chem
+    # Ensure ring info is computed
+    try:
+        Chem.FastFindRings(rd_mol)
+    except Exception:
+        pass
+    ring_info = rd_mol.GetRingInfo()
+    if not ring_info.IsInitialized():
+        return
+    for ring in ring_info.AtomRings():
+        if len(ring) < 5 or len(ring) > 6:
+            continue
+        aromatic_count = sum(1 for idx in ring if rd_mol.GetAtomWithIdx(idx).GetIsAromatic())
+        if aromatic_count >= len(ring) // 2 + 1:
+            # Mark all ring atoms as aromatic
+            for idx in ring:
+                rd_mol.GetAtomWithIdx(idx).SetIsAromatic(True)
+            # Mark all ring bonds as aromatic
+            for k in range(len(ring)):
+                bond = rd_mol.GetBondBetweenAtoms(ring[k], ring[(k + 1) % len(ring)])
+                if bond is not None:
+                    bond.SetIsAromatic(True)
+                    bond.SetBondType(AllChem.BondType.AROMATIC)
+
+
+def _fix_hypervalent_bonds(rd_mol):
+    """
+    Fix hypervalent atoms by downgrading bond orders (longest non-single bonds first),
+    taking into account explicit H neighbors.
+    """
+    pt = AllChem.GetPeriodicTable()
+    positions = rd_mol.GetConformer().GetPositions()
+
+    # Collect non-single bonds sorted by distance (longest first = most suspicious)
+    nonsingles = []
+    for bond in rd_mol.GetBonds():
+        if bond.GetBondType() in (AllChem.BondType.DOUBLE, AllChem.BondType.TRIPLE):
+            i = bond.GetBeginAtomIdx()
+            j = bond.GetEndAtomIdx()
+            dist = np.linalg.norm(positions[i] - positions[j])
+            nonsingles.append((dist, bond))
+    nonsingles.sort(reverse=True, key=lambda t: t[0])
+
+    for (d, bond) in nonsingles:
+        a1 = bond.GetBeginAtom()
+        a2 = bond.GetEndAtom()
+
+        v1 = calc_valence(a1)
+        v2 = calc_valence(a2)
+
+        # Get max valence considering formal charge
+        max1 = pt.GetDefaultValence(a1.GetAtomicNum())
+        max2 = pt.GetDefaultValence(a2.GetAtomicNum())
+        if isinstance(max1, (list, tuple)):
+            max1 = max(max1)
+        if isinstance(max2, (list, tuple)):
+            max2 = max(max2)
+
+        if v1 > max1 + a1.GetFormalCharge() or v2 > max2 + a2.GetFormalCharge():
+            if bond.GetBondType() == AllChem.BondType.TRIPLE:
+                bond.SetBondType(AllChem.BondType.DOUBLE)
+            else:
+                bond.SetBondType(AllChem.BondType.SINGLE)
+
+
+def reconstruct_from_generated_with_bonds_v2(xyz, atomic_nums, bond_index, bond_type,
+                                              aromatic=None, basic_mode=True):
+    """
+    Build RDKit mol from generated atoms (including explicit non-C hydrogens) and bonds.
+
+    Key improvements over v1:
+      1. Non-C hydrogen atoms (present in the input) are treated as explicit atoms
+         in the molecule, participating in bonding and valence calculations.
+      2. Formal charges are inferred for non-carbon atoms based on their observed
+         valence vs. expected valence (handles protonation, deprotonation, etc.).
+      3. Valence/bond-order fixing accounts for explicit H neighbors.
+      4. The output molecule retains all generated H atoms with their 3D coordinates.
+
     Args:
         xyz: [N, 3] coordinates (numpy array or list)
-        atomic_nums: [N] atomic numbers (list of int)
-        bond_index: [2, E] atom pair indices (i < j) for predicted bonds
+        atomic_nums: [N] atomic numbers (list of int), including H (1) for non-C hydrogens
+        bond_index: [2, E] atom pair indices for predicted bonds
         bond_type: [E] bond types (0=no-bond, 1=single, 2=double, 3=triple, 4=aromatic)
-        aromatic: optional, not used here but kept for API compat
-        basic_mode: not used, kept for API compat
+        aromatic: optional per-atom aromatic flags, kept for API compat
+        basic_mode: kept for API compat
     Returns:
-        RDKit Mol object
+        RDKit Mol object with explicit non-C hydrogens and inferred charges
     Fallback:
         If sanitization fails, falls back to reconstruct_from_generated
     """
@@ -569,12 +733,22 @@ def reconstruct_from_generated_with_bonds(xyz, atomic_nums, bond_index, bond_typ
     rd_mol = Chem.RWMol()
     rd_conf = Chem.Conformer(n_atoms)
 
+    # Track which atoms are H bonded to C (to distinguish from non-C H)
+    h_indices = set()
+
+    # Step 1: Add all atoms (including generated H)
     for i, atom_num in enumerate(atomic_nums):
         rd_atom = Chem.Atom(int(atom_num))
+        # Mark H atoms; we'll determine C-H vs non-C-H after bonds are added
+        if int(atom_num) == 1:
+            h_indices.add(i)
+        # Don't set implicit H count yet — let the pipeline handle it
+        rd_atom.SetNoImplicit(False)
         rd_mol.AddAtom(rd_atom)
         rd_conf.SetAtomPosition(i, Geometry.Point3D(*xyz[i]))
     rd_mol.AddConformer(rd_conf)
 
+    # Step 2: Add bonds from generated bond predictions
     BOND_MAP = {
         1: Chem.BondType.SINGLE,
         2: Chem.BondType.DOUBLE,
@@ -582,28 +756,108 @@ def reconstruct_from_generated_with_bonds(xyz, atomic_nums, bond_index, bond_typ
         4: Chem.BondType.AROMATIC,
     }
 
+    added_bonds = set()
     for idx in range(bond_index.shape[1]):
         i_atom = int(bond_index[0, idx])
         j_atom = int(bond_index[1, idx])
         bt = int(bond_type[idx])
-        if bt in BOND_MAP and i_atom < j_atom:
-            rd_mol.AddBond(i_atom, j_atom, BOND_MAP[bt])
-            if bt == 4:
-                rd_mol.GetAtomWithIdx(i_atom).SetIsAromatic(True)
-                rd_mol.GetAtomWithIdx(j_atom).SetIsAromatic(True)
+        if bt not in BOND_MAP:
+            continue
+        # Ensure each bond is only added once (handle both i<j and i>j)
+        bond_key = (min(i_atom, j_atom), max(i_atom, j_atom))
+        if bond_key in added_bonds:
+            continue
+        added_bonds.add(bond_key)
 
+        rd_mol.AddBond(i_atom, j_atom, BOND_MAP[bt])
+        if bt == 4:
+            rd_mol.GetAtomWithIdx(i_atom).SetIsAromatic(True)
+            rd_mol.GetAtomWithIdx(j_atom).SetIsAromatic(True)
+            bond_obj = rd_mol.GetBondBetweenAtoms(i_atom, j_atom)
+            if bond_obj is not None:
+                bond_obj.SetIsAromatic(True)
+
+    # Step 3: For each H atom, determine if it's bonded to C or non-C
+    # Non-C H atoms are the key ones we want to keep explicit
+    c_h_indices = set()
+    non_c_h_indices = set()
+    for h_idx in h_indices:
+        atom = rd_mol.GetAtomWithIdx(h_idx)
+        bonded_to_carbon = False
+        for neighbor in atom.GetNeighbors():
+            if neighbor.GetAtomicNum() == 6:
+                bonded_to_carbon = True
+                break
+        if bonded_to_carbon:
+            c_h_indices.add(h_idx)
+        else:
+            non_c_h_indices.add(h_idx)
+
+    # Step 4: Mark all generated H atoms as explicit (set NoImplicit on the H atoms)
+    # This ensures RDKit doesn't try to remove or re-add them
+    for h_idx in h_indices:
+        atom = rd_mol.GetAtomWithIdx(h_idx)
+        atom.SetNoImplicit(True)
+
+    # Step 5: For heavy atoms bonded to generated H, reduce their implicit H count
+    # so the total H count is correct
+    for atom in rd_mol.GetAtoms():
+        if atom.GetAtomicNum() == 1:
+            continue
+        # Count how many explicit H neighbors this heavy atom has from generated data
+        explicit_h_count = sum(1 for nbr in atom.GetNeighbors() if nbr.GetAtomicNum() == 1)
+        if explicit_h_count > 0:
+            # Let RDKit figure out remaining implicit H after charge inference
+            atom.SetNoImplicit(False)
+
+    # Step 6: Fix hypervalent atoms (considering explicit H in valence)
+    _fix_hypervalent_bonds(rd_mol)
+
+    # Step 7: Fix aromatic ring consistency
+    _fix_aromatic_ring_consistency(rd_mol)
+
+    # Step 8: Infer formal charges for non-C atoms
+    _infer_formal_charges(rd_mol)
+
+    # Step 9: Fix remaining aromatic bond/atom consistency
+    for bond in rd_mol.GetBonds():
+        a1 = bond.GetBeginAtom()
+        a2 = bond.GetEndAtom()
+        if bond.GetIsAromatic():
+            if not a1.GetIsAromatic() or not a2.GetIsAromatic():
+                bond.SetIsAromatic(False)
+                bond.SetBondType(Chem.BondType.SINGLE)
+        elif a1.GetIsAromatic() and a2.GetIsAromatic():
+            bond.SetIsAromatic(True)
+            bond.SetBondType(Chem.BondType.AROMATIC)
+
+    # Step 10: Try sanitization
     mol = rd_mol.GetMol()
     try:
-        Chem.SanitizeMol(mol)
+        Chem.SanitizeMol(mol, Chem.SANITIZE_ALL ^ Chem.SANITIZE_KEKULIZE)
+        # Try kekulization separately — if it fails, still keep the mol
+        try:
+            Chem.Kekulize(mol, clearAromaticFlags=False)
+        except Exception:
+            pass
     except Exception as e:
-        print(f"异常类型: {type(e).__name__}")
-        print(f"异常信息: {e}")
-        # print("堆栈跟踪:")
-        # traceback.print_exc()
-        # print(f"当前分子的 SMILES Before: {Chem.MolToSmiles(mol)}")
-        # Fallback to heuristic reconstruction
-        mol = reconstruct_from_generated(xyz, atomic_nums, aromatic=aromatic, basic_mode=basic_mode)
-        print(f"当前分子的 SMILES After: {Chem.MolToSmiles(mol)}")
+        print(f"[reconstruct_v2] SanitizeMol failed: {type(e).__name__}: {e}")
+        # Try a more lenient sanitization: skip properties that commonly fail
+        try:
+            mol = rd_mol.GetMol()
+            Chem.SanitizeMol(mol, Chem.SANITIZE_FINDRADICALS | Chem.SANITIZE_SETAROMATICITY |
+                             Chem.SANITIZE_SETCONJUGATION | Chem.SANITIZE_SETHYBRIDIZATION |
+                             Chem.SANITIZE_SYMMRINGS)
+        except Exception as e2:
+            print(f"[reconstruct_v2] Lenient sanitization also failed: {type(e2).__name__}: {e2}")
+            # Final fallback to heuristic reconstruction
+            try:
+                mol = reconstruct_from_generated(xyz, atomic_nums, aromatic=aromatic, basic_mode=basic_mode)
+                print(f"[reconstruct_v2] Fallback SMILES: {Chem.MolToSmiles(mol)}")
+                return mol
+            except Exception as e3:
+                print(f"[reconstruct_v2] Fallback also failed: {type(e3).__name__}: {e3}")
+                return rd_mol.GetMol()
 
     return mol
 
