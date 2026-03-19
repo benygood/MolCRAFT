@@ -639,8 +639,8 @@ def _fix_aromatic_ring_consistency(rd_mol):
     except Exception:
         pass
     ring_info = rd_mol.GetRingInfo()
-    if not ring_info.IsInitialized():
-        return
+    # if not ring_info.isInitialized():
+    #     return
     for ring in ring_info.AtomRings():
         if len(ring) < 5 or len(ring) > 6:
             continue
@@ -833,13 +833,23 @@ def reconstruct_from_generated_with_bonds_v2(xyz, atomic_nums, bond_index, bond_
 
     # Step 10: Try sanitization
     mol = rd_mol.GetMol()
+    before_smiles = Chem.MolToSmiles(mol)
+    after_sanitize_smiles = ""
+    kekulize_exp="no"
+    after_kekulize_smiles = ""
     try:
         Chem.SanitizeMol(mol, Chem.SANITIZE_ALL ^ Chem.SANITIZE_KEKULIZE)
         # Try kekulization separately — if it fails, still keep the mol
+        after_sanitize_smiles = Chem.MolToSmiles(mol)
+      
         try:
             Chem.Kekulize(mol, clearAromaticFlags=False)
+            after_kekulize_smiles = Chem.MolToSmiles(mol)
         except Exception:
+            kekulize_exp="yes"
             pass
+        # print(f"Before: {before_smiles},\nAfter Sanitize: {after_sanitize_smiles},\nAfter Kekulize: {after_kekulize_smiles}, keklize_exp: {kekulize_exp}")
+
     except Exception as e:
         print(f"[reconstruct_v2] SanitizeMol failed: {type(e).__name__}: {e}")
         # Try a more lenient sanitization: skip properties that commonly fail

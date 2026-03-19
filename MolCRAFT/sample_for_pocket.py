@@ -96,11 +96,11 @@ def get_dataloader_from_pdb(cfg, device_id):
     return test_loader
 
 
-def call(protein_fn, ligand_fn, ckpt_path='./checkpoints/last.ckpt',
+def call(protein_fn, ligand_fn, config_path='./configs/config.yaml', ckpt_path='./checkpoints/last.ckpt',
          num_samples=10, sample_steps=100, sample_num_atoms='prior', 
          beta1=1.5, sigma1_coord=0.03, sampling_strategy='end_back', seed=1234):
     
-    cfg = Config('./configs/config.yaml')
+    cfg = Config(config_path)
     seed_everything(cfg.seed)
     
     cfg.evaluation.protein_path = protein_fn
@@ -268,8 +268,9 @@ class NpEncoder(json.JSONEncoder):
 if __name__ == '__main__':
     protein_path = sys.argv[1]
     ligand_path = sys.argv[2]
-
-    call(protein_path, ligand_path, num_samples=10, sample_num_atoms='ref', ckpt_path="./checkpoints/epoch00-val_loss5.38-mol_stable0.00-complete0.96-vina_score0.00.ckpt")
+    ckpt_path = sys.argv[3]
+    config_path = sys.argv[4]
+    call(protein_path, ligand_path, config_path, num_samples=10, sample_num_atoms='ref', ckpt_path=ckpt_path)
     # out_fn = 'output/0.sdf'
     # metrics = Metrics(protein_path, ligand_path, out_fn).evaluate()
     # print(json.dumps(metrics, indent=4, cls=NpEncoder))

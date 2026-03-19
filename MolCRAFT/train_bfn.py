@@ -293,7 +293,7 @@ if __name__ == "__main__":
         # limit_train_batches=4,
         # limit_test_batches=4,
         # limit_val_batches=4,        
-        # devices=[0], 
+        devices=[0,1,2,3], 
         # fast_dev_run=1,
         #}else{
         # accelerator="gpu",          # 指定使用GPU
