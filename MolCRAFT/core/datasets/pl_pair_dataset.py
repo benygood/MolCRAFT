@@ -24,7 +24,7 @@ from typing import Callable, Optional, List, Any
 import torch
 from torch_geometric.transforms import Compose
 
-from core.datasets.utils import PDBProtein, parse_sdf_file, ATOM_FAMILIES_ID
+from core.datasets.utils import PDBProtein, parse_sdf_file, ATOM_FAMILIES_ID, BOND_TYPES_INV
 from core.datasets.pl_data import ProteinLigandData, torchify_dict
 
 import core.utils.transforms as trans
@@ -74,11 +74,14 @@ class DBReader:
     def __getitem__(self, idx):
         if self.db is None:
             self._connect_db()
-        
+
         key = self.keys[idx]
         data = pickle.loads(self.db.begin().get(key))
         data = ProteinLigandData(**data)
         data.id = idx
+        # If ligand_filename is not present, construct it from index
+        if not hasattr(data, 'ligand_filename') or data.ligand_filename is None:
+            data.ligand_filename = f'{data.pdb_id}_{idx}.sdf'
         # assert data.protein_pos.size(0) > 0
         return data
 
@@ -206,6 +209,166 @@ class PocketLigandPairDatasetV2(Dataset):
         if not os.path.exists(self.processed_path):
             print(f'{self.processed_path} does not exist, begin processing data')
             self._process()
+
+    def get_files_dir(self):
+        """Get the directory where ligand and pocket files are stored."""
+        # Get the base name of the CSV file without extension
+        base_name = os.path.basename(self.csv_path)
+        # Remove .csv extension if present
+        if base_name.endswith('.csv'):
+            base_name = base_name[:-4]
+        # The files directory is in the same directory as the CSV file
+        files_dir = os.path.join(os.path.dirname(self.csv_path), f"{base_name}_validation_set")
+        return files_dir
+
+    def export_test_files(self, indices=None):
+        """
+        Export ligand (.sdf) and pocket (.pdb) files for validation/test sets.
+        Files are stored in a directory named after the dataset.
+
+        Args:
+            indices: List of indices to export. If None, export all samples.
+        """
+        files_dir = self.get_files_dir()
+        os.makedirs(files_dir, exist_ok=True)
+
+        if indices is None:
+            indices = range(len(self))
+
+        print(f"Exporting ligand and pocket files to {files_dir}...")
+
+        for idx in tqdm(indices, desc="Exporting files"):
+            data = self[idx]
+            ligand_filename = getattr(data, 'ligand_filename', f'{data.pdb_id}_{idx}.sdf')
+            # Export ligand SDF file
+            ligand_path = os.path.join(files_dir, ligand_filename)
+            if not os.path.exists(ligand_path):
+                # Check if ligand_sdf_block exists in data
+                if hasattr(data, 'ligand_sdf_block'):
+                    sdf_block = data.ligand_sdf_block
+                else:
+                    # Generate SDF from ligand_pos and ligand_element
+                    from rdkit import Chem
+                    from rdkit.Chem import AllChem
+
+                    # Create RDKit mol from positions and elements
+                    mol = Chem.RWMol()
+                    ligand_pos = data.ligand_pos.cpu().numpy()
+                    ligand_element = data.ligand_element.cpu().numpy()
+
+                    # Add atoms
+                    for i, (pos, elem_num) in enumerate(zip(ligand_pos, ligand_element)):
+                        atom = Chem.Atom(int(elem_num))
+                        mol.AddAtom(atom)
+
+                    # Add conformer
+                    conf = Chem.Conformer(mol.GetNumAtoms())
+                    for i, pos in enumerate(ligand_pos):
+                        # Ensure pos is a 3D tuple and doesn't contain NaN/Inf
+                        pos_tuple = tuple(float(x) for x in pos)
+                        if len(pos_tuple) != 3:
+                            raise ValueError(f"Invalid position shape {pos.shape}, expected 3D coordinates")
+                        if any(np.isnan(x) or np.isinf(x) for x in pos_tuple):
+                            raise ValueError(f"Invalid coordinates (NaN/Inf): {pos_tuple}")
+                        conf.SetAtomPosition(i, pos_tuple)
+                    # print(f"ligand_pos shape: {ligand_pos.shape}")  # 应该是 (N, 3)
+                    # print(f"ligand_pos sample: {ligand_pos[0]}")    # 检查第一个坐标
+                    # print(f"Contains NaN: {np.isnan(ligand_pos).any()}")
+                    # print(f"Contains Inf: {np.isinf(ligand_pos).any()}")
+                    mol.AddConformer(conf)
+
+                    # Add bonds if available
+                    if hasattr(data, 'ligand_bond_index') and hasattr(data, 'ligand_bond_type'):
+                        bond_index = data.ligand_bond_index.cpu().numpy()
+                        bond_type = data.ligand_bond_type.cpu().numpy()
+                        for i in range(bond_index.shape[1]):
+                            start = int(bond_index[0, i])
+                            end = int(bond_index[1, i])
+                            # Skip duplicate edges (bond_index stores each edge twice)
+                            if start >= end:
+                                continue
+                            btype = int(bond_type[i])
+                            if btype > 0 and btype <= 4:
+                                mol.AddBond(start, end, BOND_TYPES_INV[btype])
+
+                    mol = mol.GetMol()
+                    sdf_block = Chem.MolToMolBlock(mol,  kekulize=False)
+
+                with open(ligand_path, 'w') as f:
+                    f.write(sdf_block)
+
+            # Export pocket PDB file
+            pocket_filename = ligand_filename.replace('.sdf', '.pdb')
+            pocket_path = os.path.join(files_dir, pocket_filename)
+
+            if not os.path.exists(pocket_path):
+                # Check if cut_protein_pdb block exists
+                if hasattr(data, 'cut_protein_pdb'):
+                    pdb_block = data.cut_protein_pdb
+                elif hasattr(data, 'pocket_pdb_block'):
+                    pdb_block = data.pocket_pdb_block
+                else:
+                    # Generate PDB from protein_pos and protein_element
+                    protein_pos = data.protein_pos.cpu().numpy()
+                    protein_element = data.protein_element.cpu().numpy()
+                    protein_atom_name = getattr(data, 'protein_atom_name', None)
+                    protein_is_backbone = getattr(data, 'protein_is_backbone', None)
+                    protein_atom_to_aa_type = getattr(data, 'protein_atom_to_aa_type', None)
+                    protein_residue_id = getattr(data, 'protein_residue_id', None)
+
+                    # Import AA_NUMBER_NAME from utils
+                    from core.datasets.utils import PDBProtein
+                    AA_NUMBER_NAME = PDBProtein.AA_NUMBER_NAME
+
+                    pdb_lines = ["HEADER    POCKET"]
+
+                    # Track residue ID assignment
+                    current_res_id = 1
+                    prev_aa_type = None
+
+                    for i, (pos, elem_num) in enumerate(zip(protein_pos, protein_element)):
+                        elem_sym = Chem.GetPeriodicTable().GetElementSymbol(int(elem_num))
+                        atom_name = protein_atom_name[i] if protein_atom_name is not None else f"{'C' if elem_sym == 'C' else 'X'}  "
+                        is_backbone = protein_is_backbone[i] if protein_is_backbone is not None else False
+
+                        # Get residue name from atom_to_aa_type if available
+                        if protein_atom_to_aa_type is not None:
+                            aa_type_idx = int(protein_atom_to_aa_type[i])
+                            res_name = AA_NUMBER_NAME.get(aa_type_idx, 'UNK')
+
+                            # Auto-increment residue ID when amino acid type changes
+                            if protein_residue_id is None:
+                                if prev_aa_type is not None and aa_type_idx != prev_aa_type:
+                                    current_res_id += 1
+                                prev_aa_type = aa_type_idx
+                                res_id = current_res_id
+                            else:
+                                res_id = protein_residue_id[i]
+                        else:
+                            res_name = "UNK"
+                            res_id = 1
+
+                        # Format PDB line
+                        record_type = "ATOM"
+                        atom_id = i + 1
+                        atom_name_formatted = f"{atom_name:>4}"
+                        chain = "A"
+                        x, y, z = pos
+                        occupancy = 1.0
+                        temp_factor = 0.0
+                        element = f"{elem_sym:>2}"
+                        charge = ""
+
+                        line = f"{record_type:<6}{atom_id:>5} {atom_name_formatted} {res_name:>3} {chain:1}{res_id:>4}    {x:>8.3f}{y:>8.3f}{z:>8.3f}{occupancy:>6.2f}{temp_factor:>6.2f}          {element:<2}{charge}"
+                        pdb_lines.append(line)
+                    pdb_lines.append("END")
+                    pdb_block = "\n".join(pdb_lines)
+
+                with open(pocket_path, 'w') as f:
+                    f.write(pdb_block)
+
+        print(f"Exported {len(indices)} ligand and pocket files to {files_dir}")
+        return files_dir
         
     def _process(self):
         db = lmdb.open(
@@ -258,10 +421,17 @@ class PocketLigandPairDatasetV2(Dataset):
             data = self.transform(data)
         return data
     
-    def make_test_split(self, split_ratio=0.9):
+    def make_test_split(self, split_ratio=0.9, export_files=True):
         """
         Create a train/test split of the dataset.
         when split_ratio is greater than 1, it is treated as the absolute number of testing samples.
+
+        Args:
+            split_ratio: Ratio for train/test split (0.9 means 90% train, 10% test)
+            export_files: If True, export ligand and pocket files for the test set
+
+        Returns:
+            dict with 'train' and 'test' Subsets
         """
         total_size = len(self)
         indices = list(range(total_size))
@@ -277,10 +447,17 @@ class PocketLigandPairDatasetV2(Dataset):
         train_indices = indices[:split]
         test_indices = indices[split:]
 
-        return {
+        result = {
             'train': Subset(self, train_indices),
             'test': Subset(self, test_indices)
         }
+
+        # Export files for test set if requested
+        if export_files:
+            print("Exporting ligand and pocket files for test set...")
+            self.export_test_files(test_indices)
+
+        return result
 
 class PocketLigandGeneratedPairDataset(Dataset):
 

@@ -38,15 +38,17 @@ class CondMolGenMetric(object):
         for data in generated:
             positions = data['pred_pos']
             atom_type = data['pred_v']
-            
+            mol = data.get('mol', None)  # Get mol object if available
+
             stability_results = check_stability(
                 positions=positions,
                 atom_type=atom_type,
                 # type_one_hot=self.type_one_hot,
                 # atom_decoder=self.atom_decoder,
                 single_bond=self.single_bond,
+                mol_list=mol,  # Pass mol object for formal charge info
             )
-            
+
             molecule_stable += int(stability_results[0])
             nr_stable_bonds += int(stability_results[1])
             n_atoms += int(stability_results[2])
@@ -83,6 +85,9 @@ class CondMolGenMetric(object):
             try:
                 # docking
                 if self.docking_config is not None:
+                    # Get pocket_files_dir from docking_config if available
+                    pocket_files_dir = getattr(self.docking_config, 'pocket_files_dir', None)
+
                     if self.docking_config.mode == 'qvina':
                         raise NotImplementedError("QVina is not supported in this version.")
                         vina_task = QVinaDockingTask.from_generated_mol(
@@ -92,7 +97,8 @@ class CondMolGenMetric(object):
                         }
                     elif self.docking_config.mode in ['vina_score', 'vina_dock']:
                         vina_task = VinaDockingTask.from_generated_mol(
-                            mol, ligand_filename, pos=pos, protein_root=self.docking_config.protein_root)
+                            mol, ligand_filename, pos=pos, protein_root=self.docking_config.protein_root,
+                            pocket_files_dir=pocket_files_dir)
                         score_only_results = vina_task.run(mode='score_only', exhaustiveness=self.docking_config.exhaustiveness)
                         minimize_results = vina_task.run(mode='minimize', exhaustiveness=self.docking_config.exhaustiveness)
                         vina_results = {

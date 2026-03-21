@@ -20,7 +20,7 @@ import shutil
 import time
 import traceback
 
-# from core.evaluation.metrics import CondMolGenMetric
+from core.evaluation.metrics import CondMolGenMetric
 from core.evaluation.utils import convert_atomcloud_to_mol_smiles, save_mol_list
 from core.evaluation.visualization import visualize, visualize_chain
 from core.utils import transforms as trans
@@ -55,7 +55,7 @@ def reconstruct_mol_and_filter_invalid(out_list):
     center_change_list, mol_pos_range_list = [], []
 
     for item in out_list:
-        ligand_smiles, pos, atom_type, is_aromatic = item.ligand_smiles, item.pos, item.atom_type, item.is_aromatic
+        ligand_filename, pos, atom_type, is_aromatic = item.ligand_filename, item.pos, item.atom_type, item.is_aromatic
         protein_pos, protein_v = item.protein_pos, item.protein_atom_feature
 
         pos = pos.cpu().numpy().astype('float64')
@@ -85,7 +85,7 @@ def reconstruct_mol_and_filter_invalid(out_list):
             mol_pos_range = np.linalg.norm(pos.max(axis=0)[0] - pos.min(axis=0)[0])
 
             res = {
-                'mol': mol, 'ligand_smiles': ligand_smiles,
+                'mol': mol, 'ligand_filename': ligand_filename,
                 'pred_pos': pos, 'pred_v': atom_type, 'is_aromatic': is_aromatic,
                 'protein_center': protein_center, 'mol_center': mol_center,
                 'center_change': center_change, 'mol_pos_range': mol_pos_range,
@@ -136,13 +136,20 @@ class ValidationCallback(Callback):
 
     def setup(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:
         super().setup(trainer, pl_module, stage)
-        # self.metric = CondMolGenMetric(
-        #     atom_decoder=self.atom_decoder,
-        #     atom_enc_mode=self.atom_enc_mode,
-        #     type_one_hot=self.type_one_hot,
-        #     single_bond=self.single_bond,
-        #     docking_config=self.docking_config,
-        # )
+        # Get pocket_files_dir from dataset if it has the method
+        pocket_files_dir = None
+        if hasattr(self.dataset, 'get_files_dir'):
+            pocket_files_dir = self.dataset.get_files_dir()
+            # Update docking_config with pocket_files_dir
+            self.docking_config.pocket_files_dir = pocket_files_dir
+
+        self.metric = CondMolGenMetric(
+            atom_decoder=self.atom_decoder,
+            atom_enc_mode=self.atom_enc_mode,
+            type_one_hot=self.type_one_hot,
+            single_bond=self.single_bond,
+            docking_config=self.docking_config,
+        )
 
     def on_train_batch_start(
             self,
@@ -300,9 +307,8 @@ class ValidationCallback(Callback):
             shutil.rmtree(path)
         os.makedirs(path, exist_ok=True)
         torch.save(results, os.path.join(path, f'generated.pt'))
-        # out_metrics = self.metric.evaluate(results)
-        # torch.save(results, os.path.join(path, f'vina_docked.pt'))
-        out_metrics = {}      
+        out_metrics = self.metric.evaluate(results)
+        torch.save(results, os.path.join(path, f'vina_docked.pt'))
         out_metrics.update(recon_dict)
         out_metrics = {f'val/{k}': v for k, v in out_metrics.items()}
         pl_module.log_dict(out_metrics)
@@ -533,16 +539,23 @@ class DockingTestCallback(Callback):
         self.type_one_hot = atom_type_one_hot
         self.docking_config = docking_config
         self.outputs = []
-    
+
     def setup(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:
         super().setup(trainer, pl_module, stage)
-        # self.metric = CondMolGenMetric(
-        #     atom_decoder=self.atom_decoder,
-        #     atom_enc_mode=self.atom_enc_mode,
-        #     type_one_hot=self.type_one_hot,
-        #     single_bond=self.single_bond,
-        #     docking_config=self.docking_config,
-        # )
+        # Get pocket_files_dir from dataset if it has the method
+        pocket_files_dir = None
+        if hasattr(self.dataset, 'get_files_dir'):
+            pocket_files_dir = self.dataset.get_files_dir()
+            # Update docking_config with pocket_files_dir
+            self.docking_config.pocket_files_dir = pocket_files_dir
+
+        self.metric = CondMolGenMetric(
+            atom_decoder=self.atom_decoder,
+            atom_enc_mode=self.atom_enc_mode,
+            type_one_hot=self.type_one_hot,
+            single_bond=self.single_bond,
+            docking_config=self.docking_config,
+        )
     
     def on_test_batch_end(
         self,
@@ -566,10 +579,14 @@ class DockingTestCallback(Callback):
         self, trainer: Trainer, pl_module: LightningModule
     ) -> None:
         super().on_test_epoch_end(trainer, pl_module)
-
+        print(f"len of outputs： {len(self.outputs)}")
         results, recon_dict = reconstruct_mol_and_filter_invalid(self.outputs)
 
         if len(results) == 0:
+            
+            
+            
+            
             print('skip validation, no mols are valid & complete')
             return
 
@@ -583,19 +600,19 @@ class DockingTestCallback(Callback):
         pl_module.cfg.save2yaml(os.path.join(path, 'config.yaml'))
         torch.save(results, os.path.join(path, f'generated.pt'))
 
-        # bad_case_dir = os.path.join(path, 'bad_cases')
-        # os.makedirs(bad_case_dir, exist_ok=True)
-        # print(f'bad cases dumped to {bad_case_dir}')
+        bad_case_dir = os.path.join(path, 'bad_cases')
+        os.makedirs(bad_case_dir, exist_ok=True)
+        print(f'bad cases dumped to {bad_case_dir}')
 
-        # out_metrics = self.metric.evaluate(results, bad_case_dir)
-        # torch.save(results, os.path.join(path, f'vina_docked.pt'))
-        # out_metrics.update(recon_dict)
-        # out_metrics = {f'test/{k}': v for k, v in out_metrics.items()}
-        # pl_module.log_dict(out_metrics)
+        out_metrics = self.metric.evaluate(results, bad_case_dir)
+        torch.save(results, os.path.join(path, f'vina_docked.pt'))
+        out_metrics.update(recon_dict)
+        out_metrics = {f'test/{k}': v for k, v in out_metrics.items()}
+        pl_module.log_dict(out_metrics)
 
-        # out_metrics['ckpt_path'] = pl_module.cfg.evaluation.ckpt_path
-        # out_metrics['test_outputs_dir'] = path
-        # out_metrics['sample_num_atoms'] = pl_module.cfg.evaluation.sample_num_atoms
-        # print(json.dumps(out_metrics, indent=4))
-        # json.dump(out_metrics, open(os.path.join(path, 'metrics.json'), 'w'), indent=4)
+        out_metrics['ckpt_path'] = pl_module.cfg.evaluation.ckpt_path
+        out_metrics['test_outputs_dir'] = path
+        out_metrics['sample_num_atoms'] = pl_module.cfg.evaluation.sample_num_atoms
+        print(json.dumps(out_metrics, indent=4))
+        json.dump(out_metrics, open(os.path.join(path, 'metrics.json'), 'w'), indent=4)
 

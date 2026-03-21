@@ -33,8 +33,8 @@ from pytorch_lightning import seed_everything
 # import glob
 
 from core.evaluation.utils import scoring_func
-# from core.evaluation.docking_vina import VinaDockingTask
-# from posecheck import PoseCheck
+from core.evaluation.docking_vina import VinaDockingTask
+from posecheck import PoseCheck
 import numpy as np
 from rdkit import Chem
 import torch
@@ -167,7 +167,7 @@ class Metrics:
 
             # docking                
             vina_task = VinaDockingTask.from_generated_mol(
-                mol, ligand_filename=self.ref_ligand_fn, protein_root='./')
+                mol, ligand_filename=self.ref_ligand_fn, protein_fn=self.protein_fn)
             score_only_results = vina_task.run(mode='score_only', exhaustiveness=self.exhaustiveness)
             minimize_results = vina_task.run(mode='minimize', exhaustiveness=self.exhaustiveness)
             docking_results = vina_task.run(mode='dock', exhaustiveness=self.exhaustiveness)
@@ -270,7 +270,8 @@ if __name__ == '__main__':
     ligand_path = sys.argv[2]
     ckpt_path = sys.argv[3]
     config_path = sys.argv[4]
-    call(protein_path, ligand_path, config_path, num_samples=10, sample_num_atoms='ref', ckpt_path=ckpt_path)
+    # call(protein_path, ligand_path, config_path, num_samples=10, sample_num_atoms='ref', ckpt_path=ckpt_path)
     # out_fn = 'output/0.sdf'
-    # metrics = Metrics(protein_path, ligand_path, out_fn).evaluate()
-    # print(json.dumps(metrics, indent=4, cls=NpEncoder))
+    out_fn = 'output/6nfy_ligand.sdf'
+    metrics = Metrics(protein_path, ligand_path, out_fn).evaluate()
+    print(json.dumps(metrics, indent=4, cls=NpEncoder))

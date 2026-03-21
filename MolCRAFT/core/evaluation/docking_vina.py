@@ -220,13 +220,43 @@ class VinaDockingTask(BaseDockingTask):
         return cls(protein_path, ligand_rdmol, **kwargs)
 
     @classmethod
-    def from_generated_mol(cls, ligand_rdmol, ligand_filename, protein_root='./data/crossdocked', **kwargs):
+    def from_generated_mol(cls, ligand_rdmol, ligand_filename, protein_fn=None, protein_root='./data/crossdocked',
+                           pocket_files_dir=None, **kwargs):
+        """
+        Create docking task from generated molecule.
+
+        Args:
+            ligand_rdmol: Generated ligand as RDKit Mol object
+            ligand_filename: Ligand filename (e.g., '123.sdf')
+            protein_fn: Protein filename (optional)
+            protein_root: Root directory for protein files
+            pocket_files_dir: Directory containing exported pocket files (optional).
+                             If provided, pocket files will be read from this directory.
+            **kwargs: Additional arguments
+        """
         # load original pdb
-        protein_fn = os.path.join(
-            os.path.dirname(ligand_filename),
-            os.path.basename(ligand_filename)[:10] + '.pdb'  # PDBId_Chain_rec.pdb
-        )
-        protein_path = os.path.join(protein_root, protein_fn)
+        if pocket_files_dir is not None:
+            # Use pocket files directory: pocket_files_dir/ligand_filename.pdb
+            pocket_basename = os.path.basename(ligand_filename).replace('.sdf', '.pdb')
+            protein_path = os.path.join(pocket_files_dir, pocket_basename)
+            if not os.path.exists(protein_path):
+                print(f"Warning: Pocket file not found at {protein_path}, falling back to default")
+                if not protein_fn:
+                    protein_fn = os.path.join(
+                        os.path.dirname(ligand_filename),
+                        os.path.basename(ligand_filename)[:10] + '.pdb'  # PDBId_Chain_rec.pdb
+                    )
+                    protein_path = os.path.join(protein_root, protein_fn)
+                else:
+                    protein_path = protein_fn
+        elif not protein_fn:
+            protein_fn = os.path.join(
+                os.path.dirname(ligand_filename),
+                os.path.basename(ligand_filename)[:10] + '.pdb'  # PDBId_Chain_rec.pdb
+            )
+            protein_path = os.path.join(protein_root, protein_fn)
+        else:
+            protein_path = protein_fn
         return cls(protein_path, ligand_rdmol, **kwargs)
 
     def __init__(self, protein_path, ligand_rdmol, tmp_dir='./tmp', center=None,
@@ -270,22 +300,27 @@ class VinaDockingTask(BaseDockingTask):
         self.error_output = None
         self.docked_sdf_path = None
 
-    def run(self, mode='dock', exhaustiveness=8, **kwargs):
-        ligand_pdbqt = self.ligand_path[:-4] + '.pdbqt'
+        # Prepare protein files once (optimized for batch processing)
         protein_pqr = self.receptor_path[:-4] + '.pqr'
         protein_pdbqt = self.receptor_path[:-4] + '.pdbqt'
+        self.protein_pdbqt = protein_pdbqt
 
+        # Only prepare if not already exists
+        prot = PrepProt(self.receptor_path)
+        if not os.path.exists(protein_pqr):
+            prot.addH(protein_pqr)
+        if not os.path.exists(protein_pdbqt):
+            prot.get_pdbqt(protein_pdbqt)
+
+    def run(self, mode='dock', exhaustiveness=8, **kwargs):
+        ligand_pdbqt = self.ligand_path[:-4] + '.pdbqt'
+
+        # Prepare ligand
         lig = PrepLig(self.ligand_path, 'sdf')
         lig.get_pdbqt(ligand_pdbqt)
 
-        prot = PrepProt(self.receptor_path)
-        # if not os.path.exists(protein_pqr):
-        prot.addH(protein_pqr)
-        # if not os.path.exists(protein_pdbqt):
-        prot.get_pdbqt(protein_pdbqt)
-        # print(os.path.exists(ligand_pdbqt), os.path.exists(protein_pqr), os.path.exists(protein_pdbqt))
-
-        dock = VinaDock(ligand_pdbqt, protein_pdbqt)
+        # Use pre-prepared protein file (prepared in __init__)
+        dock = VinaDock(ligand_pdbqt, self.protein_pdbqt)
         dock.pocket_center, dock.box_size = self.center, [self.size_x, self.size_y, self.size_z]
         try:
             score, pose = dock.dock(score_func='vina', mode=mode, exhaustiveness=exhaustiveness, save_pose=True, **kwargs)

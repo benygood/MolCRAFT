@@ -16,7 +16,7 @@ from core.callbacks.basic import RecoverCallback, GradientClip, NormalizerCallba
 from core.callbacks.validation_callback import (
     ValidationCallback,
 #     VisualizeMolAndTrajCallback,
-#     DockingTestCallback,
+    DockingTestCallback,
 )
 
 import core.utils.transforms as trans
@@ -120,7 +120,7 @@ def get_dataloader(cfg):
         )
     cfg.train.scheduler.max_iters = cfg.train.epochs * len(train_loader)
 
-    return train_loader, val_loader, test_loader
+    return train_loader, val_loader, test_loader, dataset
 
 
 def set_test_output_dir(cfg):
@@ -274,14 +274,14 @@ if __name__ == "__main__":
             tr_cfg.dynamics.sampling_strategy = cfg.dynamics.sampling_strategy
             tr_cfg.data = cfg.data
             tr_cfg.seed = cfg.seed
-            tr_cfg.data.name = 'pl'
+            tr_cfg.data.name = 'pl_ext'
             cfg = tr_cfg
         if not hasattr(cfg.train, 'max_grad_norm'):
             cfg.train.max_grad_norm = 'Q'
     else:
         cfg.save2yaml(cfg.accounting.dump_config_path)
 
-    train_loader, val_loader, test_loader = get_dataloader(cfg)
+    train_loader, val_loader, test_loader, dataset = get_dataloader(cfg)
     wandb_logger.log_hyperparams(cfg.todict())
     print(f"The config of this process is:\n{cfg}")
 
@@ -293,7 +293,8 @@ if __name__ == "__main__":
         # limit_train_batches=4,
         # limit_test_batches=4,
         # limit_val_batches=4,        
-        devices=[0,1,2,3], 
+        # devices=[0,1,2,3], 
+        devices=[0], 
         # fast_dev_run=1,
         #}else{
         # accelerator="gpu",          # 指定使用GPU
@@ -317,11 +318,12 @@ if __name__ == "__main__":
             GradientClip(max_grad_norm=cfg.train.max_grad_norm),  # time consuming
             NormalizerCallback(normalizer_dict=cfg.data.normalizer_dict),
             ValidationCallback(
-                dataset=None,  # TODO: implement CrossDockGen & NewBenchmark
+                dataset=dataset,
                 atom_decoder=cfg.data.atom_decoder,
                 atom_enc_mode=cfg.data.transform.ligand_atom_mode,
                 atom_type_one_hot=False,
-                single_bond=True,
+                # single_bond=True,
+                single_bond=False,
                 docking_config=cfg.evaluation.docking_config,
                 val_freq=cfg.train.val_freq,
                 # single_bond=cfg.evaluation.single_bond,  # TODO: check compatibility
@@ -331,14 +333,15 @@ if __name__ == "__main__":
             #     colors_dic=cfg.data.colors_dic,
             #     radius_dic=cfg.data.radius_dic,
             # ),
-            # DockingTestCallback(
-            #     dataset=None,  # TODO: implement CrossDockGen & NewBenchmark
-            #     atom_decoder=cfg.data.atom_decoder,
-            #     atom_enc_mode=cfg.data.transform.ligand_atom_mode,
-            #     atom_type_one_hot=False,
-            #     single_bond=True,
-            #     docking_config=cfg.evaluation.docking_config,
-            # ),
+            DockingTestCallback(
+                dataset=dataset,
+                atom_decoder=cfg.data.atom_decoder,
+                atom_enc_mode=cfg.data.transform.ligand_atom_mode,
+                atom_type_one_hot=False,
+                # single_bond=True,
+                single_bond=False,
+                docking_config=cfg.evaluation.docking_config,
+            ),
             ModelCheckpoint(
                 monitor="val/recon_loss",
                 every_n_epochs=cfg.train.ckpt_freq,

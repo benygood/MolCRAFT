@@ -17,6 +17,7 @@ BOND_TYPES = {
     BondType.AROMATIC: 4,
 }
 BOND_NAMES = {v: str(k) for k, v in BOND_TYPES.items()}
+BOND_TYPES_INV = {v: k for k, v in BOND_TYPES.items()}
 HYBRIDIZATION_TYPE = ['S', 'SP', 'SP2', 'SP3', 'SP3D', 'SP3D2']
 HYBRIDIZATION_TYPE_ID = {s: i for i, s in enumerate(HYBRIDIZATION_TYPE)}
 
@@ -30,6 +31,10 @@ class PDBProtein(object):
 
     AA_NAME_NUMBER = {
         k: i for i, (k, _) in enumerate(AA_NAME_SYM.items())
+    }
+
+    AA_NUMBER_NAME = {
+        i: k for k, i in AA_NAME_NUMBER.items()
     }
 
     BACKBONE_NAMES = ["CA", "C", "N", "O"]
@@ -54,6 +59,7 @@ class PDBProtein(object):
         self.atom_name = []
         self.is_backbone = []
         self.atom_to_aa_type = []
+        self.residue_id = []  # Store residue ID for each atom
         # Residue properties
         self.residues = []
         self.amino_acid = []
@@ -149,15 +155,20 @@ class PDBProtein(object):
         #                 print("H join to H!!!")
         
         if len(delete_inds) > 0:
-            self.atoms = [element for index, element in enumerate(self.atoms) if index not in delete_inds]   
+            self.atoms = [element for index, element in enumerate(self.atoms) if index not in delete_inds]
             self.element = [element for index, element in enumerate(self.element) if index not in delete_inds]
-            self.atomic_weight = [element for index, element in enumerate(self.atomic_weight) if index not in delete_inds]  
+            self.atomic_weight = [element for index, element in enumerate(self.atomic_weight) if index not in delete_inds]
             self.pos = [element for index, element in enumerate(self.pos) if index not in delete_inds]
-            self.atom_name = [element for index, element in enumerate(self.atom_name) if index not in delete_inds]   
-            self.is_backbone = [element for index, element in enumerate(self.is_backbone) if index not in delete_inds]  
-        
-        
+            self.atom_name = [element for index, element in enumerate(self.atom_name) if index not in delete_inds]
+            self.is_backbone = [element for index, element in enumerate(self.is_backbone) if index not in delete_inds]
+
+
         for i, atom in enumerate(self.atoms):
+            if atom['res_name'] not in self.AA_NAME_NUMBER:
+                atom['res_name'] = 'UNK'
+            self.atom_to_aa_type.append(self.AA_NAME_NUMBER[atom['res_name']])
+            self.residue_id.append(atom['res_id'])  # Store residue ID for each atom
+            chain_res_id = '%s_%s_%d_%s' % (atom['chain'], atom['segment'], atom['res_id'], atom['res_insert_id'])
             if atom['res_name'] not in self.AA_NAME_NUMBER:
                 atom['res_name'] = 'UNK'
             self.atom_to_aa_type.append(self.AA_NAME_NUMBER[atom['res_name']])
@@ -204,7 +215,8 @@ class PDBProtein(object):
             'pos': np.array(self.pos, dtype=np.float32),
             'is_backbone': np.array(self.is_backbone, dtype=bool),
             'atom_name': self.atom_name,
-            'atom_to_aa_type': np.array(self.atom_to_aa_type, dtype=int)
+            'atom_to_aa_type': np.array(self.atom_to_aa_type, dtype=int),
+            'residue_id': np.array(self.residue_id, dtype=int)
         }
 
     def to_dict_residue(self):

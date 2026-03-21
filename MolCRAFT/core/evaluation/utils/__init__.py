@@ -167,6 +167,7 @@ def check_stability(
     single_bond=False,
     debug=False,
     with_h=False,
+    mol_list=None,
 ):
     assert len(positions.shape) == 2
     assert positions.shape[1] == 3
@@ -203,8 +204,26 @@ def check_stability(
             nr_bonds[i] += order
             nr_bonds[j] += order
     nr_stable_bonds = 0
-    for atom_type_i, nr_bonds_i in zip(atom_type, nr_bonds):
+    for atom_idx, (atom_type_i, nr_bonds_i) in enumerate(zip(atom_type, nr_bonds)):
         possible_bonds = bond_analyze.allowed_bonds[atom_type_i]
+
+        # Adjust max bonds based on formal charge if mol is provided
+        # (e.g., protonated N with 4 bonds should have charge +1)
+        if mol_list is not None:
+            try:
+                formal_charge = mol_list.GetAtomWithIdx(atom_idx).GetFormalCharge()
+                # Increase allowed valence by positive formal charge
+                # e.g., N with charge +1 can have 4 bonds instead of 3
+                if formal_charge > 0 and type(possible_bonds) == int:
+                    possible_bonds = possible_bonds + formal_charge
+                # Decrease allowed valence by negative formal charge
+                # e.g., O with charge -1 should have fewer bonds
+                elif formal_charge < 0 and type(possible_bonds) == int:
+                    possible_bonds = max(possible_bonds + formal_charge, 0)
+            except Exception:
+                # If getting formal charge fails, use default possible_bonds
+                pass
+
         # hydrogen added, no more implicit bonds
         if with_h:
             if type(possible_bonds) == int:
@@ -217,9 +236,15 @@ def check_stability(
                 possible_bonds = max(possible_bonds)
             is_stable = (possible_bonds >= nr_bonds_i > 0)
         if not is_stable and debug:
+            charge_info = ""
+            if mol_list is not None:
+                try:
+                    charge_info = f" (charge={mol_list.GetAtomWithIdx(atom_idx).GetFormalCharge()})"
+                except Exception:
+                    pass
             print(
-                "Invalid bonds for molecule %s with %d bonds"
-                % (atom_type_i, nr_bonds_i)
+                "Invalid bonds for atom %s%s with %d bonds (max allowed: %s)"
+                % (atom_type_i, charge_info, nr_bonds_i, possible_bonds)
             )
         nr_stable_bonds += int(is_stable)
 
