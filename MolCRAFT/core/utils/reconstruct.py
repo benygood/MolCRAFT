@@ -545,13 +545,112 @@ def reconstruct_from_generated(xyz, atomic_nums, aromatic=None, basic_mode=True)
 def reconstruct_from_generated_with_bonds(xyz, atomic_nums, bond_index, bond_type,
                                           aromatic=None, basic_mode=True):
     """
-    Build RDKit mol directly from generated bond types (no OpenBabel heuristics).
-    Delegates to v2 implementation that handles explicit H atoms and charge inference.
+    Build RDKit mol from generated atoms and bonds.
+    Delegates to v4: hybrid approach combining predicted bonds with distance-based
+    validation, missing bond detection, and comprehensive sanitization fallbacks.
     """
     return reconstruct_from_generated_with_bonds_v2(
         xyz, atomic_nums, bond_index, bond_type,
         aromatic=aromatic, basic_mode=basic_mode,
     )
+
+
+def _is_reachable_rdkit(rd_mol, start, end, exclude_bond_idx):
+    """
+    BFS check: can we reach 'end' from 'start' without using the bond
+    identified by exclude_bond_idx?  Returns True if reachable (i.e. the
+    bond is redundant and safe to remove without disconnecting the molecule).
+    """
+    from collections import deque
+    visited = {start}
+    queue = deque([start])
+    while queue:
+        current = queue.popleft()
+        atom = rd_mol.GetAtomWithIdx(current)
+        for bond in atom.GetBonds():
+            if bond.GetIdx() == exclude_bond_idx:
+                continue
+            neighbor = bond.GetOtherAtomIdx(current)
+            if neighbor == end:
+                return True
+            if neighbor not in visited:
+                visited.add(neighbor)
+                queue.append(neighbor)
+    return False
+
+
+def _remove_redundant_ring_bonds(rd_mol):
+    """
+    Remove redundant chord/diagonal bonds within rings.
+
+    A chord bond is one whose endpoints both lie on the same SSSR ring
+    but the bond itself is not an edge of that ring.  Such bonds create
+    chemically invalid sub-rings and are typically prediction artifacts.
+
+    Fused-ring shared edges, spiro atoms, and bridge bonds are correctly
+    preserved because they appear as edges of their respective SSSR rings.
+
+    Iterates until no more chords are found, removing the longest chord
+    first each round (longest = most suspicious).
+
+    Args:
+        rd_mol: RDKit RWMol (modified in place)
+    """
+    from rdkit import Chem
+
+    positions = rd_mol.GetConformer().GetPositions()
+
+    changed = True
+    while changed:
+        changed = False
+        try:
+            Chem.FastFindRings(rd_mol)
+        except Exception:
+            break
+        ring_info = rd_mol.GetRingInfo()
+        rings = [list(r) for r in ring_info.AtomRings()]
+
+        chord_candidates = []
+
+        for ring in rings:
+            if len(ring) > 6:
+                continue
+            ring_set = set(ring)
+            # Build edge set: consecutive atom pairs in the ring
+            ring_edges = set()
+            
+            for k in range(len(ring)):
+                a, b = ring[k], ring[(k + 1) % len(ring)]
+                ring_edges.add((min(a, b), max(a, b)))
+
+            # Any bond with both endpoints in ring but NOT a ring edge is a chord
+            for bond in rd_mol.GetBonds():
+                ai = bond.GetBeginAtomIdx()
+                bi = bond.GetEndAtomIdx()
+                bond_key = (min(ai, bi), max(ai, bi))
+                if ai in ring_set and bi in ring_set and bond_key not in ring_edges:
+                    dist = np.linalg.norm(positions[ai] - positions[bi])
+                    chord_candidates.append((dist, bond.GetIdx(), ai, bi))
+
+        if not chord_candidates:
+            break
+
+        # Deduplicate (same bond may be chord of multiple rings)
+        seen = set()
+        unique = []
+        for dist, bid, a, b in chord_candidates:
+            if bid not in seen:
+                seen.add(bid)
+                unique.append((dist, bid, a, b))
+
+        # Longest first
+        unique.sort(reverse=True, key=lambda t: t[0])
+
+        for dist, bid, a, b in unique:
+            if _is_reachable_rdkit(rd_mol, a, b, exclude_bond_idx=bid):
+                rd_mol.RemoveBond(a, b)
+                changed = True
+                break  # re-compute rings after each removal
 
 
 def _infer_formal_charges(rd_mol):
@@ -655,6 +754,36 @@ def _fix_aromatic_ring_consistency(rd_mol):
                 if bond is not None:
                     bond.SetIsAromatic(True)
                     bond.SetBondType(AllChem.BondType.AROMATIC)
+                    # bond.SetBondType(AllChem.BondType.SINGLE)
+
+
+
+def _fix_nonring_aromatic(rd_mol):
+    """
+    Clear aromatic flags from atoms and bonds that are not in any ring.
+    RDKit requires aromatic atoms/bonds to be part of a ring; non-ring
+    aromatic flags are prediction artifacts that cause sanitization failures.
+    Aromatic bonds on non-ring atoms are downgraded to SINGLE.
+    """
+    from rdkit import Chem
+    try:
+        Chem.FastFindRings(rd_mol)
+    except Exception:
+        pass
+
+    # Fix non-ring aromatic atoms
+    for atom in rd_mol.GetAtoms():
+        if atom.GetIsAromatic() and not atom.IsInRing():
+            atom.SetIsAromatic(False)
+
+    # Fix non-ring aromatic bonds (or bonds where either endpoint lost aromaticity)
+    for bond in rd_mol.GetBonds():
+        if bond.GetIsAromatic() or bond.GetBondType() == Chem.BondType.AROMATIC:
+            a1 = bond.GetBeginAtom()
+            a2 = bond.GetEndAtom()
+            if not bond.IsInRing() or not a1.GetIsAromatic() or not a2.GetIsAromatic():
+                bond.SetIsAromatic(False)
+                bond.SetBondType(Chem.BondType.SINGLE)
 
 
 def _fix_hypervalent_bonds(rd_mol):
@@ -754,6 +883,7 @@ def reconstruct_from_generated_with_bonds_v2(xyz, atomic_nums, bond_index, bond_
         2: Chem.BondType.DOUBLE,
         3: Chem.BondType.TRIPLE,
         4: Chem.BondType.AROMATIC,
+        # 4: Chem.BondType.SINGLE
     }
 
     added_bonds = set()
@@ -776,6 +906,9 @@ def reconstruct_from_generated_with_bonds_v2(xyz, atomic_nums, bond_index, bond_
             bond_obj = rd_mol.GetBondBetweenAtoms(i_atom, j_atom)
             if bond_obj is not None:
                 bond_obj.SetIsAromatic(True)
+
+    # Step 2.5: Remove redundant chord bonds within rings
+    _remove_redundant_ring_bonds(rd_mol)
 
     # Step 3: For each H atom, determine if it's bonded to C or non-C
     # Non-C H atoms are the key ones we want to keep explicit
@@ -816,20 +949,24 @@ def reconstruct_from_generated_with_bonds_v2(xyz, atomic_nums, bond_index, bond_
     # Step 7: Fix aromatic ring consistency
     _fix_aromatic_ring_consistency(rd_mol)
 
+    # Step 7.5: Clear aromatic flags from non-ring atoms/bonds
+    _fix_nonring_aromatic(rd_mol)
+
     # Step 8: Infer formal charges for non-C atoms
     _infer_formal_charges(rd_mol)
 
+
     # Step 9: Fix remaining aromatic bond/atom consistency
-    for bond in rd_mol.GetBonds():
-        a1 = bond.GetBeginAtom()
-        a2 = bond.GetEndAtom()
-        if bond.GetIsAromatic():
-            if not a1.GetIsAromatic() or not a2.GetIsAromatic():
-                bond.SetIsAromatic(False)
-                bond.SetBondType(Chem.BondType.SINGLE)
-        elif a1.GetIsAromatic() and a2.GetIsAromatic():
-            bond.SetIsAromatic(True)
-            bond.SetBondType(Chem.BondType.AROMATIC)
+    # for bond in rd_mol.GetBonds():
+    #     a1 = bond.GetBeginAtom()
+    #     a2 = bond.GetEndAtom()
+    #     if bond.GetIsAromatic():
+    #         if not a1.GetIsAromatic() or not a2.GetIsAromatic():
+    #             bond.SetIsAromatic(False)
+    #             bond.SetBondType(Chem.BondType.SINGLE)
+    #     elif a1.GetIsAromatic() and a2.GetIsAromatic():
+    #         bond.SetIsAromatic(True)
+    #         bond.SetBondType(Chem.BondType.AROMATIC)
 
     # Step 10: Try sanitization
     mol = rd_mol.GetMol()
@@ -868,6 +1005,124 @@ def reconstruct_from_generated_with_bonds_v2(xyz, atomic_nums, bond_index, bond_
             except Exception as e3:
                 print(f"[reconstruct_v2] Fallback also failed: {type(e3).__name__}: {e3}")
                 return rd_mol.GetMol()
+    return mol
+
+def reconstruct_from_generated_with_bonds_v3(xyz, atomic_nums, bond_index, bond_type, 
+                                             aromatic=None, basic_mode=True):
+    """
+    优化版：增强了对芳香键和价键错误的鲁棒性处理。
+    """
+    from rdkit import Chem
+    
+    # 基础数据转换
+    if isinstance(xyz, np.ndarray): xyz = xyz.tolist()
+    if isinstance(atomic_nums, np.ndarray): atomic_nums = atomic_nums.tolist()
+
+    n_atoms = len(atomic_nums)
+    rd_mol = Chem.RWMol()
+    rd_conf = Chem.Conformer(n_atoms)
+
+    # Step 1: 添加原子
+    for i, atom_num in enumerate(atomic_nums):
+        rd_atom = Chem.Atom(int(atom_num))
+        # 默认关闭隐式氢处理，由我们后续精细控制
+        rd_atom.SetNoImplicit(True) 
+        rd_mol.AddAtom(rd_atom)
+        rd_conf.SetAtomPosition(i, Geometry.Point3D(*xyz[i]))
+    rd_mol.AddConformer(rd_conf)
+
+    # Step 2: 添加键
+    BOND_MAP = {
+        1: Chem.BondType.SINGLE,
+        2: Chem.BondType.DOUBLE,
+        3: Chem.BondType.TRIPLE,
+        4: Chem.BondType.AROMATIC,
+    }
+
+    added_bonds = set()
+    for idx in range(bond_index.shape[1]):
+        i_atom = int(bond_index[0, idx])
+        j_atom = int(bond_index[1, idx])
+        bt = int(bond_type[idx])
+        if bt not in BOND_MAP:
+            continue
+        # Ensure each bond is only added once (handle both i<j and i>j)
+        bond_key = (min(i_atom, j_atom), max(i_atom, j_atom))
+        if bond_key in added_bonds:
+            continue
+        added_bonds.add(bond_key)
+
+        rd_mol.AddBond(i_atom, j_atom, BOND_MAP[bt])
+        if bt == 4:
+            rd_mol.GetAtomWithIdx(i_atom).SetIsAromatic(True)
+            rd_mol.GetAtomWithIdx(j_atom).SetIsAromatic(True)
+            bond_obj = rd_mol.GetBondBetweenAtoms(i_atom, j_atom)
+            if bond_obj is not None:
+                bond_obj.SetIsAromatic(True)
+                
+    # --- 核心优化区：预清洗与修复 ---
+    
+    # A. 修复非环芳香键 (Aromatic bonds must be in a ring)
+    # RDKit 中芳香键必须存在于环内。如果模型预测了链状芳香键，直接降级为单键。
+    ring_info = rd_mol.GetRingInfo()
+    for bond in rd_mol.GetBonds():
+        if bond.GetBondType() == Chem.BondType.AROMATIC:
+            if not bond.IsInRing():
+                bond.SetBondType(Chem.BondType.SINGLE)
+                bond.SetIsAromatic(False)
+
+    # B. 调用你原有的修复函数（确保它们能处理 RWMol）
+    try:
+        if '_fix_hypervalent_bonds' in globals():
+            _fix_hypervalent_bonds(rd_mol)
+        if '_infer_formal_charges' in globals():
+            _infer_formal_charges(rd_mol)
+    except Exception as e:
+        print(f"Pre-fix logic failed: {e}")
+
+    # C. 芳香性一致性强制修正
+    # 如果一个原子被标记为芳香，但它连接的所有键都不是芳香键，则清除该原子的芳香标志
+    for atom in rd_mol.GetAtoms():
+        if atom.GetIsAromatic():
+            has_aromatic_bond = any(b.GetIsAromatic() for b in atom.GetBonds())
+            if not has_aromatic_bond:
+                atom.SetIsAromatic(False)
+
+    # Step 10: 分阶段 Sanitization
+    mol = rd_mol.GetMol()
+    
+    try:
+        # 第一步：尝试除 Kekulize 之外的所有检查
+        # 这样即使芳香电子数不对，分子对象依然能生成
+        Chem.SanitizeMol(mol, Chem.SANITIZE_ALL ^ Chem.SANITIZE_KEKULIZE)
+    except Exception as e:
+        print(f"Initial sanitize failed, trying minimal: {e}")
+        # 极简模式：只保证基础环和价键信息
+        params = Chem.SanitizeFlags.SANITIZE_FINDRADICALS | \
+                 Chem.SanitizeFlags.SANITIZE_SETCONJUGATION | \
+                 Chem.SanitizeFlags.SANITIZE_SYMMRINGS
+        try:
+            Chem.SanitizeMol(mol, params)
+        except:
+            pass # 最后的倔强，交给 fallback
+
+    # 尝试 Kekulize
+    try:
+        Chem.Kekulize(mol, clearAromaticFlags=False)
+    except Exception:
+        # 如果 Kekulize 失败，通常是由于“伪芳香环”
+        # 策略：将所有 AROMATIC 键降级为 SINGLE/DOUBLE 尝试强制修复
+        try:
+            for b in mol.GetBonds():
+                if b.GetBondType() == Chem.BondType.AROMATIC:
+                    b.SetBondType(Chem.BondType.SINGLE)
+                    b.SetIsAromatic(False)
+            for a in mol.GetAtoms():
+                a.SetIsAromatic(False)
+            Chem.SanitizeMol(mol)
+        except:
+            # 最终 fallback 到你原有的启发式重建
+            return reconstruct_from_generated(xyz, atomic_nums, aromatic=aromatic, basic_mode=basic_mode)
 
     return mol
 

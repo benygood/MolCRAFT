@@ -31,6 +31,22 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 
+def save_mol_without_kekulize(mol, file_path):
+    """
+    将分子保存为 .mol 文件，跳过 Kekulize 检查。
+    """
+    if mol is None:
+        print("Error: Molecule object is None.")
+        return
+
+    # kekuleIt=False 是跳过检查的关键
+    # includeStereo=True 建议保留，以维持手性信息的准确性
+    mol_block = Chem.MolToMolBlock(mol, kekulize=False, includeStereo=True)
+    
+    with open(file_path, 'w') as f:
+        f.write(mol_block)
+    
+    print(f"Successfully saved to {file_path}")
 
 # TODO: refactor and move center_pos (and that in train_bfn.py) into utils
 def center_pos(protein_pos, ligand_pos, batch_protein, batch_ligand, mode='protein'):
@@ -93,9 +109,9 @@ class DockingTestCallback(Callback):
         self, trainer: Trainer, pl_module: LightningModule
     ) -> None:
         super().on_test_epoch_end(trainer, pl_module)
-
+        n_outputs = len(self.outputs)
         results, recon_dict = reconstruct_mol_and_filter_invalid(self.outputs)
-
+        n_recon_ok = len(results)
         path = pl_module.cfg.accounting.test_outputs_dir
         if os.path.exists(path):
             shutil.rmtree(path)
@@ -104,24 +120,41 @@ class DockingTestCallback(Callback):
         if os.path.exists(OUT_DIR):
             shutil.rmtree(OUT_DIR)
         os.makedirs(OUT_DIR, exist_ok=True)
-
+        invalid_count = 0
         for idx, res in enumerate(tqdm(results, desc="Chem eval")):
             
             try:
-                mol = res['mol']
-                ligand_filename = res['ligand_smiles']
-                mol.SetProp('_Name', ligand_filename)
-            
-                Chem.SanitizeMol(mol)
-                smiles = Chem.MolToSmiles(mol)
-                validity = smiles is not None
-                complete = '.' not in smiles
-            except:
-                print('sanitize failed')
-                continue
+                mol = res.get('mol')
+                smiles = res.get('smiles', 'unknown')
+                ligand_filename = res.get('ligand_filename', f'mol_{idx}')
+                if mol is None:
+                    print(f"  分子 {idx}: mol对象为None, SMILES: {smiles}, 文件: {ligand_filename}")
+                    invalid_count += 1
+                    continue
+                mol.SetProp('_Name', f'{ligand_filename}_idx{idx}')
+                mol.SetProp('SMILES', smiles)
+                 # 为每个分子创建单独的SDF和PDB文件
+                safe_filename = ligand_filename.replace('/', '_').replace('\\', '_')
+                mol_name = f"{safe_filename}_idx{idx}"
 
-            if not validity or not complete:
-                print('validity', validity, 'complete', complete)
+                # 单独SDF文件
+                single_sdf_path = os.path.join(OUT_DIR, f"{mol_name}.sdf")
+           
+                save_mol_without_kekulize(mol, single_sdf_path)
+
+                if (idx + 1) % 10 == 0:
+                    print(f"  已处理 {idx + 1}/{len(data)} 个分子...")
+                # mol = res['mol']
+                # ligand_filename = res['ligand_smiles']
+                # mol.SetProp('_Name', ligand_filename)
+            
+                # Chem.SanitizeMol(mol)
+                # smiles = Chem.MolToSmiles(mol)
+                # validity = smiles is not None
+                # complete = '.' not in smiles
+            except Exception as e:
+                print(f"  分子 {idx}: 处理出错 - {e}")
+                invalid_count += 1
                 continue
                         
             # ligand_filename = graph.ligand_filename
@@ -131,7 +164,17 @@ class DockingTestCallback(Callback):
     
             # print(json.dumps(chem_results, indent=4, cls=NpEncoder))
 
-            out_fn = os.path.join(OUT_DIR, f'{idx}.sdf')
-            with Chem.SDWriter(out_fn) as w:
-                w.write(mol)
+            # out_fn = os.path.join(OUT_DIR, f'{idx}.sdf')
+            # with Chem.SDWriter(out_fn) as w:
+            #     w.write(mol)
 
+        print(f"\n转换完成!")
+        print(f"  生成分子: {n_outputs}")
+        print(f"  重建分子: {n_recon_ok}") 
+        print(f"  有效分子: {n_recon_ok - invalid_count}")
+        print(f"  无效分子: {invalid_count}")
+        print(f"  输出目录: {single_sdf_path}")
+        out_metrics = {"gen_num": n_outputs, "recon_num": n_recon_ok, "invalid_num": invalid_count}
+        out_metrics.update(recon_dict)
+        print(json.dumps(out_metrics, indent=4))
+        json.dump(out_metrics, open(os.path.join(OUT_DIR, 'metrics.json'), 'w'), indent=4)

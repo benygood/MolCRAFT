@@ -75,7 +75,7 @@ data:
   transform:
     ligand_atom_mode: add_aromatic
   with_split: True
-  split_ratio: 1000
+  split_ratio: 20
   atom_decoder: ['H', 'C', 'N', 'O', 'F', 'P', 'S', 'Cl']
   colors_dic: ['#FFFFFF99', 'C7', 'C0', 'C3', 'C1', 'C4', 'C8', 'C9', ]
   radius_dic: [0.3, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6]
@@ -128,7 +128,4 @@ evaluation:
     exhaustiveness: 16
   ligand_path: !SUB ${ligand_path:-null}
   protein_path: !SUB ${protein_path:-null}
-
-
-
-
+  

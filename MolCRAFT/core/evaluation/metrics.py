@@ -265,17 +265,18 @@ class CondMolGenMetric(object):
 
         def stat3(arr, name):
             n_total = len(arr)
-            isnan = np.isnan(arr)
-            n_isnan = isnan.sum()
-            arr2 = arr[~isnan]
+            # isnan = np.isnan(arr)
+            valid = (arr != None) & (~np.array([x is np.nan for x in arr]))
+            # n_isnan = isnan.sum()
+            n_valid = valid.sum()
+            arr2 = arr[valid]
             perc = np.percentile(arr2, [25, 50, 75])
             return {
-                f'{name}_fail': n_isnan / n_total,
+                f'{name}_fail': (n_total - n_valid) / n_total,
                 f'{name}_25': perc[0],
                 f'{name}_50': perc[1],
                 f'{name}_75': perc[2],
             }
-
         # metrics.update(stat1(results.clash_list, 'clash'))
         metrics.update(stat3(results.strain_list, 'strain'))
     

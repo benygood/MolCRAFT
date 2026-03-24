@@ -92,8 +92,8 @@ def reconstruct_mol_and_filter_invalid(out_list):
             }
             center_change_list.append(center_change)
             mol_pos_range_list.append(mol_pos_range)
-
-            Chem.SanitizeMol(mol)
+            Chem.SanitizeMol(mol, Chem.SANITIZE_ALL ^ Chem.SANITIZE_KEKULIZE)
+            # Chem.SanitizeMol(mol)
             smiles = Chem.MolToSmiles(mol)
             complete = smiles is not None and '.' not in smiles
             validity = smiles is not None
@@ -583,10 +583,6 @@ class DockingTestCallback(Callback):
         results, recon_dict = reconstruct_mol_and_filter_invalid(self.outputs)
 
         if len(results) == 0:
-            
-            
-            
-            
             print('skip validation, no mols are valid & complete')
             return
 

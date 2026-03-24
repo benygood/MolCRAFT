@@ -169,10 +169,7 @@ class PDBProtein(object):
             self.atom_to_aa_type.append(self.AA_NAME_NUMBER[atom['res_name']])
             self.residue_id.append(atom['res_id'])  # Store residue ID for each atom
             chain_res_id = '%s_%s_%d_%s' % (atom['chain'], atom['segment'], atom['res_id'], atom['res_insert_id'])
-            if atom['res_name'] not in self.AA_NAME_NUMBER:
-                atom['res_name'] = 'UNK'
-            self.atom_to_aa_type.append(self.AA_NAME_NUMBER[atom['res_name']])
-            chain_res_id = '%s_%s_%d_%s' % (atom['chain'], atom['segment'], atom['res_id'], atom['res_insert_id'])
+
             if chain_res_id not in residues_tmp:
                 residues_tmp[chain_res_id] = {
                     'name': atom['res_name'],
