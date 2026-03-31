@@ -70,7 +70,7 @@ def reconstruct_mol_and_filter_invalid(out_list):
         # TODO turn off basic_mode = False to use predicted aromaticity
         try:
             # Prefer using predicted bonds for reconstruction
-            if pred_halfedge_index is not None and pred_halfedge_type is not None:
+            if pred_halfedge_index is not None and pred_halfedge_type is not None and False:
                 he_idx = pred_halfedge_index.cpu().numpy()
                 he_type = pred_halfedge_type.cpu().numpy()
                 mol = reconstruct_from_generated_with_bonds(pos, atom_type, he_idx, he_type, is_aromatic)
