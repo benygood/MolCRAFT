@@ -269,7 +269,7 @@ if __name__ == '__main__':
     protein_path = sys.argv[1]
     ligand_path = sys.argv[2]
 
-    call(protein_path, ligand_path, num_samples=10, sample_num_atoms='ref', ckpt_path="./checkpoints/epoch00-val_loss5.38-mol_stable0.00-complete0.96-vina_score0.00.ckpt")
+    call(protein_path, ligand_path, num_samples=10, sample_num_atoms='ref', ckpt_path="./checkpoints/epoch07-val_loss4.89-mol_stable0.00-complete0.98-vina_score0.00.ckpt")
     # out_fn = 'output/0.sdf'
     # metrics = Metrics(protein_path, ligand_path, out_fn).evaluate()
     # print(json.dumps(metrics, indent=4, cls=NpEncoder))
