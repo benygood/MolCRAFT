@@ -143,7 +143,7 @@ class DockingTestCallback(Callback):
                 save_mol_without_kekulize(mol, single_sdf_path)
 
                 if (idx + 1) % 10 == 0:
-                    print(f"  已处理 {idx + 1}/{len(data)} 个分子...")
+                    print(f"  已处理 {idx + 1}/{len(results)} 个分子...")
                 # mol = res['mol']
                 # ligand_filename = res['ligand_smiles']
                 # mol.SetProp('_Name', ligand_filename)
